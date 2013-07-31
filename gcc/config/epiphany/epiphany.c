@@ -166,6 +166,8 @@ static rtx_insn *frame_insn (rtx);
 
 #define TARGET_MODE_AFTER epiphany_mode_after
 
+#define TARGET_CAN_ELIMINATE epiphany_can_eliminate
+
 #include "target-def.h"
 
 #undef TARGET_ASM_ALIGNED_HI_OP
@@ -971,7 +973,8 @@ struct epiphany_frame_info
   unsigned int reg_size;	/* # bytes needed to store regs.  */
   unsigned int var_size;	/* # bytes that variables take up.  */
   HARD_REG_SET gmask;		/* Set of saved gp registers.  */
-  int          initialized;	/* Nonzero if frame size already calculated.  */
+  bool		initialized;	/* True if frame size already calculated.  */
+  bool frame_offset_known;
   int      stld_sz;             /* Current load/store data size for offset
 				   adjustment. */
   int      need_fp;             /* value to override "frame_pointer_needed */
@@ -982,6 +985,7 @@ struct epiphany_frame_info
      with a POST_MODIFY to allocate the rest of the frame.  */
   int first_slot, last_slot, first_slot_offset, last_slot_offset;
   int first_slot_size;
+  int sft_hd_frame_offset; /* Offset from soft to hard frame pointer.  */
   int small_threshold;
 };
 
@@ -1056,6 +1060,31 @@ epiphany_compute_function_type (tree decl)
   return fn_type;
 }
 
+/* Set lr_slot_offset in MACHINE_FUNCTION, taking a value relative to
+   the stack pointer after register save area allocation.  */
+static void
+set_lr_slot_offset (long lr_slot_offset)
+{
+  if (current_frame_info.need_fp)
+    {
+      long sft_hd_frame_offset
+	= (current_frame_info.first_slot_offset - current_frame_info.reg_size
+	   - lr_slot_offset);
+      if (current_frame_info.frame_offset_known)
+	gcc_assert (current_frame_info.sft_hd_frame_offset
+		    = sft_hd_frame_offset);
+      else
+	current_frame_info.sft_hd_frame_offset = sft_hd_frame_offset;
+      current_frame_info.frame_offset_known = true;
+      lr_slot_offset = 0;
+    }
+  lr_slot_offset += current_frame_info.last_slot_offset;
+  if (MACHINE_FUNCTION (cfun)->lr_slot_known)
+    gcc_assert (MACHINE_FUNCTION (cfun)->lr_slot_offset == lr_slot_offset);
+  MACHINE_FUNCTION (cfun)->lr_slot_offset = lr_slot_offset;
+  MACHINE_FUNCTION (cfun)->lr_slot_known = reload_completed;
+}
+
 #define RETURN_ADDR_REGNUM GPR_LR
 #define FRAME_POINTER_MASK (1 << (FRAME_POINTER_REGNUM))
 #define RETURN_ADDR_MASK (1 << (RETURN_ADDR_REGNUM))
@@ -1065,12 +1094,11 @@ epiphany_compute_function_type (tree decl)
    Don't consider them here.  */
 #define MUST_SAVE_REGISTER(regno, interrupt_p) \
   ((df_regs_ever_live_p (regno) \
+    || ((regno) == GPR_FP && current_frame_info.need_fp) \
     || (interrupt_p && !crtl->is_leaf \
 	&& call_used_or_fixed_reg_p (regno) && !fixed_regs[regno])) \
    && (!call_used_or_fixed_reg_p (regno) || regno == GPR_LR \
        || (interrupt_p && regno != GPR_SP)))
-
-#define MUST_SAVE_RETURN_ADDR 0
 
 /* Return the bytes needed to compute the frame pointer from the current
    stack pointer.
@@ -1100,6 +1128,7 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
   last_slot = -1;
   last_slot_offset = 0;
   first_slot_size = UNITS_PER_WORD;
+  current_frame_info.frame_offset_known = false;
 
   /* See if this is an interrupt handler.  Call used registers must be saved
      for them too.  */
@@ -1108,7 +1137,8 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 
   /* Calculate space needed for registers.  */
 
-  for (regno = MAX_EPIPHANY_PARM_REGS - 1; pretend_size > reg_size; regno--)
+  for (regno = GPR_0 + MAX_EPIPHANY_PARM_REGS - 1; pretend_size > reg_size;
+       regno--)
     {
       reg_size += UNITS_PER_WORD;
       SET_HARD_REG_BIT (gmask, regno);
@@ -1121,10 +1151,13 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
   else
     small_slots = epiphany_stack_offset / UNITS_PER_WORD;
 
-  if (frame_pointer_needed)
+  /* We can't just rely on frame_pointer_needed here to pick up overlay
+     requirements because we are also called from
+     epiphany_initial_elimination_offset.  */
+  if (frame_pointer_needed || (flag_pic && !crtl->is_leaf))
     {
       current_frame_info.need_fp = 1;
-      if (!interrupt_p && first_slot < 0)
+      if (!interrupt_p && !pretend_size)
 	first_slot = GPR_FP;
     }
   else
@@ -1136,11 +1169,15 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 	  gcc_assert (!TEST_HARD_REG_BIT (gmask, regno));
 	  reg_size += UNITS_PER_WORD;
 	  SET_HARD_REG_BIT (gmask, regno);
-	  /* FIXME: when optimizing for speed, take schedling into account
+	  /* FIXME: when optimizing for speed, take scheduling into account
 	     when selecting these registers.  */
 	  if (regno == first_slot)
-	    gcc_assert (regno == GPR_FP && frame_pointer_needed);
-	  else if (!interrupt_p && first_slot < 0)
+	    gcc_assert (regno == GPR_FP && current_frame_info.need_fp);
+	  else if (!interrupt_p && first_slot < 0
+		   /* Don't split a paired save.  */
+		   && (!pretend_size || (regno & 1)
+		       || epiphany_stack_offset - pretend_size != UNITS_PER_WORD
+		       || !MUST_SAVE_REGISTER (regno + 1, interrupt_p)))
 	    first_slot = regno;
 	  else if (last_slot < 0
 		   && (first_slot ^ regno) != 1
@@ -1148,13 +1185,22 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 	    last_slot = regno;
 	}
     }
+  if (first_slot < 0 && pretend_size)
+    {
+      first_slot
+	= GPR_0 + MAX_EPIPHANY_PARM_REGS - 1 - pretend_size / UNITS_PER_WORD;
+      first_slot_size = 2 * UNITS_PER_WORD;
+      reg_size += UNITS_PER_WORD;
+      gcc_assert (first_slot + 1 < GPR_0 + MAX_EPIPHANY_PARM_REGS);
+      gcc_assert (TEST_HARD_REG_BIT (gmask, first_slot + 1));
+      CLEAR_HARD_REG_BIT (gmask, first_slot + 1);
+    }
   if (TEST_HARD_REG_BIT (gmask, GPR_LR))
     MACHINE_FUNCTION (cfun)->lr_clobbered = 1;
   /* ??? Could sometimes do better than that.  */
   current_frame_info.small_threshold
     = (optimize >= 3 || interrupt_p ? 0
-       : pretend_size ? small_slots
-       : 4 + small_slots - (first_slot == GPR_FP));
+       : small_slots - (!pretend_size && first_slot == GPR_FP ? 2 : 0));
 
   /* If there might be variables with 64-bit alignment requirement, align the
      start of the variables.  */
@@ -1170,7 +1216,7 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 	+ EPIPHANY_STACK_ALIGN (4))
        <= (unsigned) epiphany_stack_offset)
       && !interrupt_p
-      && crtl->is_leaf && !frame_pointer_needed)
+      && crtl->is_leaf && !current_frame_info.need_fp)
     {
       first_slot = -1;
       last_slot = -1;
@@ -1197,7 +1243,9 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 	    CLEAR_HARD_REG_BIT (gmask, last_slot);
 	}
     }
-  else if (total_size + reg_size < 0x1ffc && first_slot >= 0)
+  else if ((total_size + reg_size < 0x3fc
+	    || (total_size + reg_size < 0x1ffc && !current_frame_info.need_fp))
+	   && first_slot >= 0)
     {
       first_slot_offset = EPIPHANY_STACK_ALIGN (total_size + reg_size);
       last_slot = -1;
@@ -1217,7 +1265,7 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 	       ? EPIPHANY_STACK_ALIGN (reg_size - epiphany_stack_offset) : 0);
 	  if (!first_slot_offset)
 	    {
-	      if (first_slot != GPR_FP || !current_frame_info.need_fp)
+	      if ((first_slot ^ GPR_FP) > 1 || !current_frame_info.need_fp)
 		last_slot = first_slot;
 	      first_slot = -1;
 	    }
@@ -1239,6 +1287,8 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
 	  first_slot_size = 2 * UNITS_PER_WORD;
 	  first_slot &= ~1;
 	}
+      if (first_slot == GPR_LR)
+	set_lr_slot_offset (first_slot_offset);
     }
   total_size = first_slot_offset + last_slot_offset;
 
@@ -1254,6 +1304,33 @@ epiphany_compute_frame_size (int size /* # of var. bytes allocated.  */)
   current_frame_info.first_slot_offset	= first_slot_offset;
   current_frame_info.first_slot_size	= first_slot_size;
   current_frame_info.last_slot_offset	= last_slot_offset;
+
+  /* When pretend args are present, the link / frame pointer can not be
+     conveniently saved at the start of the frame.  For overlay support,
+     we still need the hard frame pointer to point there for non-leaf
+     functions, so if we don't know the location yet, emit
+     prologue / eiplogue to find out.  */
+  if (flag_pic && !crtl->is_leaf && !current_frame_info.frame_offset_known)
+    {
+      /* Pretend it's initialized for now so that we can expand the prologue
+	 without further recursion.  */
+      current_frame_info.initialized  = true;
+
+      current_frame_info.sft_hd_frame_offset = 0; /* Arbitrary.  */
+      start_sequence ();
+      epiphany_expand_prologue ();
+      if (!current_frame_info.frame_offset_known)
+	epiphany_expand_epilogue (0);
+      end_sequence ();
+      gcc_assert (current_frame_info.frame_offset_known);
+    }
+  /* If we haven't got a hard frame pointer assignment yet, let it be equal
+     to the stack pointer after the register save area allocation.  */
+  if (!current_frame_info.frame_offset_known)
+    {
+      current_frame_info.sft_hd_frame_offset = first_slot_offset - reg_size;
+      current_frame_info.frame_offset_known = true;
+    }
 
   current_frame_info.initialized  = reload_completed;
 
@@ -1739,14 +1816,9 @@ epiphany_emit_save_restore (int min, int limit, rtx addr, int epilogue_p)
 
 	  if (GET_CODE (m_addr) == PLUS)
 	    lr_slot_offset = INTVAL (XEXP (m_addr, 1));
-	  if (frame_pointer_needed)
-	    lr_slot_offset += (current_frame_info.first_slot_offset
-			       - current_frame_info.total_size);
-	  if (MACHINE_FUNCTION (cfun)->lr_slot_known)
-	    gcc_assert (MACHINE_FUNCTION (cfun)->lr_slot_offset
-			== lr_slot_offset);
-	  MACHINE_FUNCTION (cfun)->lr_slot_offset = lr_slot_offset;
-	  MACHINE_FUNCTION (cfun)->lr_slot_known = 1;
+	  if (n > limit)
+	    lr_slot_offset += current_frame_info.first_slot_offset;
+	  set_lr_slot_offset (lr_slot_offset);
 	}
 
       if (!epilogue_p)
@@ -1816,8 +1888,8 @@ epiphany_expand_prologue (void)
       if (current_frame_info.first_slot >= 0)
 	{
 	  machine_mode mode
-	= (current_frame_info.first_slot_size == UNITS_PER_WORD
-	   ? word_mode : DImode);
+	    = (current_frame_info.first_slot_size == UNITS_PER_WORD
+	       ? word_mode : DImode);
 
 	  off = GEN_INT (-current_frame_info.first_slot_offset);
 	  mem = gen_frame_mem (BLKmode,
@@ -1828,12 +1900,23 @@ epiphany_expand_prologue (void)
 			off, mem));
 	  addr = plus_constant (Pmode, addr,
 				current_frame_info.first_slot_offset);
+	  if (current_frame_info.first_slot == GPR_LR)
+	    set_lr_slot_offset (current_frame_info.first_slot_offset);
 	}
     }
   epiphany_emit_save_restore (current_frame_info.small_threshold,
 			      FIRST_PSEUDO_REGISTER, addr, 0);
   if (current_frame_info.need_fp)
-    frame_move_insn (hard_frame_pointer_rtx, stack_pointer_rtx);
+    {
+      long frame_adjust
+	= ((current_frame_info.first_slot_offset - current_frame_info.reg_size)
+	   - current_frame_info.sft_hd_frame_offset);
+      if (frame_adjust)
+	frame_insn (gen_addsi3_i (hard_frame_pointer_rtx, stack_pointer_rtx,
+				  GEN_INT (frame_adjust)));
+      else
+	frame_move_insn (hard_frame_pointer_rtx, stack_pointer_rtx);
+    }
   /* For large frames, allocate bulk of frame.  This is usually joint with one
      register save.  */
   if (current_frame_info.last_slot >= 0)
@@ -1890,11 +1973,19 @@ epiphany_expand_epilogue (int sibcall_p)
   fn_type = epiphany_compute_function_type( current_function_decl);
   interrupt_p = EPIPHANY_INTERRUPT_P (fn_type);
 
-  /* For variable frames, deallocate bulk of frame.  */
-  if (current_frame_info.need_fp)
+  /* For variable frames, or large frames where we got a frame pointer,
+     deallocate bulk of frame.  */
+  if (cfun->calls_alloca
+      || (current_frame_info.last_slot_offset && current_frame_info.need_fp))
     {
+      long frame_adjust
+	= ((current_frame_info.first_slot_offset - current_frame_info.reg_size)
+	   - current_frame_info.sft_hd_frame_offset);
       mem = gen_frame_mem (BLKmode, stack_pointer_rtx);
-      emit_insn (gen_stack_adjust_mov (mem));
+      if (frame_adjust)
+	emit_insn (gen_stack_adjust_add (GEN_INT (frame_adjust), mem));
+      else
+	emit_insn (gen_stack_adjust_mov (mem));
     }
   /* Else for large static frames, deallocate bulk of frame.  */
   else if (current_frame_info.last_slot_offset)
@@ -1966,13 +2057,14 @@ epiphany_initial_elimination_offset (int from, int to)
   if (from == FRAME_POINTER_REGNUM && to == STACK_POINTER_REGNUM)
     return current_frame_info.total_size - current_frame_info.reg_size;
   if (from == FRAME_POINTER_REGNUM && to == HARD_FRAME_POINTER_REGNUM)
-    return current_frame_info.first_slot_offset - current_frame_info.reg_size;
+    return current_frame_info.sft_hd_frame_offset;
   if (from == ARG_POINTER_REGNUM && to == STACK_POINTER_REGNUM)
     return (current_frame_info.total_size
 	    - ((current_frame_info.pretend_size + 4) & -8));
   if (from == ARG_POINTER_REGNUM && to == HARD_FRAME_POINTER_REGNUM)
-    return (current_frame_info.first_slot_offset
-	    - ((current_frame_info.pretend_size + 4) & -8));
+    return (current_frame_info.reg_size
+	    - ((current_frame_info.pretend_size + 4) & -8)
+	    + current_frame_info.sft_hd_frame_offset);
   gcc_unreachable ();
 }
 
@@ -3037,6 +3129,18 @@ static HOST_WIDE_INT
 epiphany_starting_frame_offset (void)
 {
   return epiphany_stack_offset;
+}
+
+/* Return true if register FROM can be eliminated via register TO.  */
+
+static bool
+epiphany_can_eliminate (const int from ATTRIBUTE_UNUSED, const int to)
+{
+  /* When compiling for overlays, we require a frame pointer in all non-leaf
+     functions so that the runtime can easily find all active functions.
+     In that case, also eliminate the argument pointer exclusively to the
+     hard frame pointer.  */
+  return !flag_pic || crtl->is_leaf || to != STACK_POINTER_REGNUM;
 }
 
 struct gcc_target targetm = TARGET_INITIALIZER;
