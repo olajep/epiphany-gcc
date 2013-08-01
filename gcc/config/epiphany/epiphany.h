@@ -210,7 +210,7 @@ along with GCC; see the file COPYING3.  If not see
    All registers that the compiler knows about must be given numbers,
    even those that are not normally considered general registers.  */
 
-#define FIRST_PSEUDO_REGISTER 79
+#define FIRST_PSEUDO_REGISTER 78
 
 
 /* General purpose registers.  */
@@ -245,7 +245,6 @@ along with GCC; see the file COPYING3.  If not see
 	1, 1, 1, 1, 1, 1,               /* Core Control Registers.  */  \
 	1, 1, 1,			/* FP_{NEAREST,...}_REGNUM */\
 	1,				/* UNKNOWN_REGNUM - placeholder.  */\
-	1,				/* TRACE_REGNUM.  */\
 }
 
 /* Like `FIXED_REGISTERS' but has 1 for each register that is clobbered (in
@@ -274,7 +273,6 @@ along with GCC; see the file COPYING3.  If not see
 	1, 1, 1, 1, 1, 1,               /* Core Control Registers.  */  \
 	1, 1, 1,			/* FP_{NEAREST,...}_REGNUM */\
 	1,				/* UNKNOWN_REGNUM - placeholder.  */\
-	1,				/* TRACE_REGNUM.  */\
 }
 
 #define REG_ALLOC_ORDER \
@@ -293,7 +291,7 @@ along with GCC; see the file COPYING3.  If not see
     14, 13, /* Link register, stack pointer.  */ \
     /* Can't allocate, but must name these... */ \
     28, 29, 30, 31, \
-    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78 \
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77 \
   }
 
 #define HARD_REGNO_RENAME_OK(SRC, DST) epiphany_regno_rename_ok (SRC, DST)
@@ -360,7 +358,7 @@ enum reg_class {
   { 0xffff100f,0xffffff00,0x0},  /* SIBCALL_REGS */			\
   { 0xffffffff,0xffffffff,0x0003}, /* GENERAL_REGS */			\
   { 0x00000000,0x00000000,0x03f0}, /* CORE_CONTROL_REGS */		\
-  { 0xffffffff,0xffffffff,0x7fff}, /* ALL_REGS */				\
+  { 0xffffffff,0xffffffff,0x3fff}, /* ALL_REGS */				\
 }
 
 
@@ -425,6 +423,7 @@ typedef struct GTY (()) machine_function
   unsigned lr_clobbered : 1;
   unsigned control_use_inserted : 1;
   unsigned lr_slot_known : 1;
+  unsigned expanded_non_sibcall : 1;
   unsigned sw_entities_processed : 6;
   long lr_slot_offset;
   rtx and_mask;
@@ -479,7 +478,7 @@ typedef struct GTY (()) machine_function
 #define ELIMINABLE_REGS						\
 {{ FRAME_POINTER_REGNUM, STACK_POINTER_REGNUM},			\
  { FRAME_POINTER_REGNUM, HARD_FRAME_POINTER_REGNUM},		\
- { TRACE_REGNUM, HARD_FRAME_POINTER_REGNUM},		\
+ { HARD_FRAME_POINTER_REGNUM, STACK_POINTER_REGNUM},		\
  { ARG_POINTER_REGNUM, STACK_POINTER_REGNUM},                   \
  { ARG_POINTER_REGNUM, HARD_FRAME_POINTER_REGNUM},		\
 }
@@ -725,7 +724,7 @@ typedef struct GTY (()) machine_function
   "r56", "r57", "r58", "r59", "r60", "r61", "r62", "r63",	\
   "ap",  "sfp", "cc1", "cc2",					\
   "config", "status", "lc", "ls", "le", "iret",			\
-  "fp_near", "fp_trunc", "fp_anyfp", "unknown", "trace"		\
+  "fp_near", "fp_trunc", "fp_anyfp", "unknown"			\
 }
 
 #define FINAL_PRESCAN_INSN(INSN, OPVEC, NOPERANDS) \
