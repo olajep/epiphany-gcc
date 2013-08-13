@@ -132,6 +132,7 @@
     {
     case SYMBOL_REF :
     case LABEL_REF :
+      return !flag_pic || !pcrel_operand (op, Pmode);
     case CONST :
       return 1;
     case CONST_INT :
@@ -371,8 +372,15 @@
 (define_predicate "memclob_operand"
   (match_code "mem"))
 
-(define_predicate "nonsymbolic_immediate_operand"
-  (ior (match_test "immediate_operand (op, mode)")
+(define_predicate "pcrel_operand"
+  (ior (match_code "label_ref")
+       (and (match_code "const,plus")
+	    (match_test "pcrel_operand (XEXP (op, 0), mode)"))))
+; ??? should also include overlay-local SYMBOL_REFs, if we can identify these.
+
+(define_predicate "nonpcrel_immediate_operand"
+  (ior (and (match_operand 0 "immediate_operand")
+	    (not (match_operand 0 "pcrel_operand")))
        (match_code "const_vector"))) /* Is this specific enough?  */
 
 ;; Return true if OP is misaligned memory operand
