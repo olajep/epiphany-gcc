@@ -1,3 +1,8 @@
+2014-12-12  Joern Rennecke  <joern.rennecke@embecosm.com>
+
+	* config/epiphany/epiphany.md (casesi_load): Use next_nonnote_insn to
+	find jump_table_data insn.
+
 2013-10-31  Joern Rennecke <joern.rennecke@embecosm.com>
 
 	* config/epiphany/epiphany.md (stack_adjust_addfp, stack_adjust_mov):
