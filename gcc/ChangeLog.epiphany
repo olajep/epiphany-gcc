@@ -1,5 +1,12 @@
 2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
 
+	* config/epiphany/epiphany.opt (-mno-sched-prolog): Rename ...
+	(-msched-prolog): ... to this. Remove RejectNegative
+	constraint. Default is still -msched-prolog.
+	* doc/invoke.texi (Epiphany Options): Add -msched-prolog.
+
+2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
+
 	* config/epiphany/epiphany.h [IN_TARGET_LIBS]
 	(BIGGEST_FIELD_ALIGNMENT): Add definition. Hack for libobjc.
 	[!IN_TARGET_LIBS] (ROUND_TYPE_ALIGN, ADJUST_FIELD_ALIGN):
