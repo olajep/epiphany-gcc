@@ -1,5 +1,10 @@
 2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
 
+	* config/epiphany/epiphany.h (ENDFILE_SPEC): Add
+	cachemanager.o when -fPIC is used.
+
+2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
+
 	* config/epiphany/epiphany.c (epiphany_lra_p): New function.
 	(TARGET_LRA_P): Define to epiphany_lra_p.
 	* config/epiphany/epiphany-protos.h (epiphany_lra_p): Declare.
