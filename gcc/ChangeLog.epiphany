@@ -1,5 +1,11 @@
 2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
 
+	* config/epiphany/epiphany.md (divsi3_1, modsi3_1, udivsi3_1,
+	umodsi3_1): Don't match if operands[2] is in r0.
+	* testsuite/gcc.target/epiphany/divmodsi-1.c: New test.
+
+2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
+
 	* config/epiphany/epiphany.h (ENDFILE_SPEC): Add
 	cachemanager.o when -fPIC is used.
 
