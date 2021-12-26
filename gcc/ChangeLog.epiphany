@@ -1,3 +1,12 @@
+2021-12-26  Ola Jeppsson  <ola.jeppsson@gmail.com>
+
+	* config/epiphany/epiphany.md (define_expand "casesi"): Remove
+	unneeded operand to emit_cmp_and_jump_insns().
+	(define_insn "casesi_load"): Fix cast of operand to rtx_insn.
+	* config/epiphany/epiphany.c: Include "cfgrtl.h".
+	(epiphany_expand_prologue): Remove VOIDmode argument to
+	gen_rtx_SET.
+
 2019-03-24  Ola Jeppsson  <ola@adapteva.com>
 
 	* config/epiphany/epiphany.opt (fsoftware-cache): Add missing
