@@ -45,6 +45,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "explow.h"
 #include "expr.h"
 #include "tm-constrs.h"
+#include "cfgrtl.h"
 #include "tree-pass.h"	/* for current_pass */
 #include "context.h"
 #include "pass_manager.h"
@@ -1945,7 +1946,7 @@ epiphany_expand_prologue (void)
 			     GEN_INT (frame_adjust));
       else
 	insn
-	  = gen_rtx_SET (VOIDmode, hard_frame_pointer_rtx, stack_pointer_rtx);
+	  = gen_rtx_SET (hard_frame_pointer_rtx, stack_pointer_rtx);
       (frame_pointer_needed ? frame_insn : emit_insn) (insn);
 	
     }
@@ -1991,7 +1992,7 @@ epiphany_expand_prologue (void)
 	  reg = gen_rtx_REG (Pmode, GPR_IP);
 	  frame_move_insn (reg, off);
 	  note = gen_rtx_PLUS (Pmode, stack_pointer_rtx, off);
-	  note = gen_rtx_SET (VOIDmode, stack_pointer_rtx, note);
+	  note = gen_rtx_SET (stack_pointer_rtx, note);
 	  off = reg;
 	}
       insn = frame_insn (gen_stack_adjust_add (off, mem));
