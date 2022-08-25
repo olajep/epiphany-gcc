@@ -152,5 +152,5 @@ Target Mask(SOFT_CACHE)
 Use software cache.
 
 mno-sched-prolog
-Target RejectNegative Report Mask(NO_SCHED_PROLOG)
+Target RejectNegative Mask(NO_SCHED_PROLOG)
 Disallow scheduling of a function's prologue sequence.

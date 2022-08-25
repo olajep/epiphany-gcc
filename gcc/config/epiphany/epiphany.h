@@ -673,9 +673,6 @@ typedef struct GTY (()) machine_function
 #define TEXT_SECTION_ASM_OP	"\t.section .text"
 #define DATA_SECTION_ASM_OP	"\t.section .data"
 
-#undef  READONLY_DATA_SECTION_ASM_OP
-#define READONLY_DATA_SECTION_ASM_OP	"\t.section .rodata"
-
 #define BSS_SECTION_ASM_OP	"\t.section .bss"
 
 /* Define this macro if jump tables (for tablejump insns) should be
