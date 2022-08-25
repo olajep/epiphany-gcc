@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Free Software Foundation, Inc.
+/* Copyright (C) 2007-2021 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -390,7 +390,7 @@ arm_pragma_target_parse (tree args, tree pop_target)
   if (! args)
     {
       cur_tree = ((pop_target) ? pop_target : target_option_default_node);
-      cl_target_option_restore (&global_options,
+      cl_target_option_restore (&global_options, &global_options_set,
 				TREE_TARGET_OPTION (cur_tree));
     }
   else
@@ -399,7 +399,7 @@ arm_pragma_target_parse (tree args, tree pop_target)
 						  &global_options_set);
       if (cur_tree == NULL_TREE)
 	{
-	  cl_target_option_restore (&global_options,
+	  cl_target_option_restore (&global_options, &global_options_set,
 				    TREE_TARGET_OPTION (prev_tree));
 	  return false;
 	}
@@ -408,8 +408,8 @@ arm_pragma_target_parse (tree args, tree pop_target)
        target_option_current_node, but not handle_pragma_target.  */
       target_option_current_node = cur_tree;
       arm_configure_build_target (&arm_active_target,
-				  TREE_TARGET_OPTION (cur_tree),
-				  &global_options_set, false);
+				  TREE_TARGET_OPTION (cur_tree), false);
+      arm_option_reconfigure_globals ();
     }
 
   /* Update macros if target_node changes. The global state will be restored
@@ -445,7 +445,9 @@ arm_pragma_target_parse (tree args, tree pop_target)
       acond_macro = get_identifier ("__ARM_FEATURE_LDREX");
       C_CPP_HASHNODE (acond_macro)->flags |= NODE_CONDITIONAL;
 
+      cpp_force_token_locations (parse_in, BUILTINS_LOCATION);
       arm_cpu_builtins (parse_in);
+      cpp_stop_forcing_token_locations (parse_in);
 
       cpp_opts->warn_unused_macros = saved_warn_unused_macros;
 

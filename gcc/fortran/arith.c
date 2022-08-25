@@ -1,5 +1,5 @@
 /* Compiler arithmetic
-   Copyright (C) 2000-2020 Free Software Foundation, Inc.
+   Copyright (C) 2000-2021 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -94,30 +94,29 @@ gfc_arith_error (arith code)
   switch (code)
     {
     case ARITH_OK:
-      p = _("Arithmetic OK at %L");
+      p = G_("Arithmetic OK at %L");
       break;
     case ARITH_OVERFLOW:
-      p = _("Arithmetic overflow at %L");
+      p = G_("Arithmetic overflow at %L");
       break;
     case ARITH_UNDERFLOW:
-      p = _("Arithmetic underflow at %L");
+      p = G_("Arithmetic underflow at %L");
       break;
     case ARITH_NAN:
-      p = _("Arithmetic NaN at %L");
+      p = G_("Arithmetic NaN at %L");
       break;
     case ARITH_DIV0:
-      p = _("Division by zero at %L");
+      p = G_("Division by zero at %L");
       break;
     case ARITH_INCOMMENSURATE:
-      p = _("Array operands are incommensurate at %L");
+      p = G_("Array operands are incommensurate at %L");
       break;
     case ARITH_ASYMMETRIC:
-      p =
-	_("Integer outside symmetric range implied by Standard Fortran at %L");
+      p = G_("Integer outside symmetric range implied by Standard Fortran"
+	     " at %L");
       break;
     case ARITH_WRONGCONCAT:
-      p =
-	_("Illegal type in character concatenation at %L");
+      p = G_("Illegal type in character concatenation at %L");
       break;
 
     default:
@@ -1306,6 +1305,8 @@ reduce_binary_ac (arith (*eval) (gfc_expr *, gfc_expr *, gfc_expr **),
   head = gfc_constructor_copy (op1->value.constructor);
   for (c = gfc_constructor_first (head); c; c = gfc_constructor_next (c))
     {
+      gfc_simplify_expr (c->expr, 0);
+
       if (c->expr->expr_type == EXPR_CONSTANT)
         rc = eval (c->expr, op2, &r);
       else
@@ -1322,9 +1323,19 @@ reduce_binary_ac (arith (*eval) (gfc_expr *, gfc_expr *, gfc_expr **),
   else
     {
       gfc_constructor *c = gfc_constructor_first (head);
-      r = gfc_get_array_expr (c->expr->ts.type, c->expr->ts.kind,
-			      &op1->where);
-      r->shape = gfc_copy_shape (op1->shape, op1->rank);
+      if (c)
+	{
+	  r = gfc_get_array_expr (c->expr->ts.type, c->expr->ts.kind,
+				  &op1->where);
+	  r->shape = gfc_copy_shape (op1->shape, op1->rank);
+	}
+      else
+	{
+	  gcc_assert (op1->ts.type != BT_UNKNOWN);
+	  r = gfc_get_array_expr (op1->ts.type, op1->ts.kind,
+				  &op1->where);
+	  r->shape = gfc_get_shape (op1->rank);
+	}
       r->rank = op1->rank;
       r->value.constructor = head;
       *result = r;
@@ -1346,6 +1357,8 @@ reduce_binary_ca (arith (*eval) (gfc_expr *, gfc_expr *, gfc_expr **),
   head = gfc_constructor_copy (op2->value.constructor);
   for (c = gfc_constructor_first (head); c; c = gfc_constructor_next (c))
     {
+      gfc_simplify_expr (c->expr, 0);
+
       if (c->expr->expr_type == EXPR_CONSTANT)
 	rc = eval (op1, c->expr, &r);
       else
@@ -1362,9 +1375,19 @@ reduce_binary_ca (arith (*eval) (gfc_expr *, gfc_expr *, gfc_expr **),
   else
     {
       gfc_constructor *c = gfc_constructor_first (head);
-      r = gfc_get_array_expr (c->expr->ts.type, c->expr->ts.kind,
-			      &op2->where);
-      r->shape = gfc_copy_shape (op2->shape, op2->rank);
+      if (c)
+	{
+	  r = gfc_get_array_expr (c->expr->ts.type, c->expr->ts.kind,
+				  &op2->where);
+	  r->shape = gfc_copy_shape (op2->shape, op2->rank);
+	}
+      else
+	{
+	  gcc_assert (op2->ts.type != BT_UNKNOWN);
+	  r = gfc_get_array_expr (op2->ts.type, op2->ts.kind,
+				  &op2->where);
+	  r->shape = gfc_get_shape (op2->rank);
+	}
       r->rank = op2->rank;
       r->value.constructor = head;
       *result = r;
@@ -1388,7 +1411,7 @@ reduce_binary_aa (arith (*eval) (gfc_expr *, gfc_expr *, gfc_expr **),
   gfc_expr *r;
   arith rc = ARITH_OK;
 
-  if (!gfc_check_conformance (op1, op2, "elemental binary operation"))
+  if (!gfc_check_conformance (op1, op2, _("elemental binary operation")))
     return ARITH_INCOMMENSURATE;
 
   head = gfc_constructor_copy (op1->value.constructor);
@@ -1465,6 +1488,9 @@ eval_intrinsic (gfc_intrinsic_op op,
   gfc_expr temp, *result;
   int unary;
   arith rc;
+
+  if (!op1)
+    return NULL;
 
   gfc_clear_ts (&temp.ts);
 
@@ -1680,11 +1706,11 @@ eval_type_intrinsic0 (gfc_intrinsic_op iop, gfc_expr *op)
 
 /* Return nonzero if the expression is a zero size array.  */
 
-static int
+static bool
 gfc_zero_size_array (gfc_expr *e)
 {
-  if (e->expr_type != EXPR_ARRAY)
-    return 0;
+  if (e == NULL || e->expr_type != EXPR_ARRAY)
+    return false;
 
   return e->value.constructor == NULL;
 }
@@ -1745,6 +1771,9 @@ eval_intrinsic_f3 (gfc_intrinsic_op op,
 {
   gfc_expr *result;
   eval_f f;
+
+  if (!op1 && !op2)
+    return NULL;
 
   result = reduce_binary0 (op1, op2);
   if (result != NULL)

@@ -1,6 +1,6 @@
 // Debugging deque implementation -*- C++ -*-
 
-// Copyright (C) 2003-2020 Free Software Foundation, Inc.
+// Copyright (C) 2003-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -64,6 +64,16 @@ namespace __debug
       template<typename _ItT, typename _SeqT, typename _CatT>
 	friend class ::__gnu_debug::_Safe_iterator;
 
+      // Reference wrapper for base class. Disambiguates deque(const _Base&)
+      // from copy constructor by requiring a user-defined conversion.
+      // See PR libstdc++/90102.
+      struct _Base_ref
+      {
+	_Base_ref(const _Base& __r) : _M_ref(__r) { }
+
+	const _Base& _M_ref;
+      };
+
     public:
       typedef typename _Base::reference			reference;
       typedef typename _Base::const_reference		const_reference;
@@ -120,7 +130,7 @@ namespace __debug
       deque(size_type __n, const _Allocator& __a = _Allocator())
       : _Base(__n, __a) { }
 
-      deque(size_type __n, const _Tp& __value,
+      deque(size_type __n, const __type_identity_t<_Tp>& __value,
 	    const _Allocator& __a = _Allocator())
       : _Base(__n, __value, __a) { }
 #else
@@ -143,8 +153,8 @@ namespace __debug
 		__gnu_debug::__base(__last), __a)
 	{ }
 
-      deque(const _Base& __x)
-      : _Base(__x) { }
+      deque(_Base_ref __x)
+      : _Base(__x._M_ref) { }
 
 #if __cplusplus < 201103L
       deque&
@@ -640,6 +650,11 @@ namespace __debug
 	   typename = _RequireAllocator<_Allocator>>
     deque(_InputIterator, _InputIterator, _Allocator = _Allocator())
       -> deque<_ValT, _Allocator>;
+
+  template<typename _Tp, typename _Allocator = allocator<_Tp>,
+	   typename = _RequireAllocator<_Allocator>>
+    deque(size_t, _Tp, _Allocator = _Allocator())
+      -> deque<_Tp, _Allocator>;
 #endif
 
   template<typename _Tp, typename _Alloc>

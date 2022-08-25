@@ -1,5 +1,5 @@
 /* Subroutines for insn-output.c for HPPA.
-   Copyright (C) 1992-2020 Free Software Foundation, Inc.
+   Copyright (C) 1992-2021 Free Software Foundation, Inc.
    Contributed by Tim Moore (moore@cs.utah.edu), based on sparc.c
 
 This file is part of GCC.
@@ -293,7 +293,7 @@ static size_t n_deferred_plabels = 0;
 #undef TARGET_ASM_OUTPUT_MI_THUNK
 #define TARGET_ASM_OUTPUT_MI_THUNK pa_asm_output_mi_thunk
 #undef TARGET_ASM_CAN_OUTPUT_MI_THUNK
-#define TARGET_ASM_CAN_OUTPUT_MI_THUNK default_can_output_mi_thunk_no_vcall
+#define TARGET_ASM_CAN_OUTPUT_MI_THUNK hook_bool_const_tree_hwi_hwi_const_tree_true
 
 #undef TARGET_ASM_FILE_END
 #define TARGET_ASM_FILE_END pa_file_end
@@ -497,7 +497,7 @@ fix_range (const char *const_str)
       break;
 
   if (i > FP_REG_LAST)
-    target_flags |= MASK_DISABLE_FPREGS;
+    target_flags |= MASK_SOFT_FLOAT;
 }
 
 /* Implement the TARGET_OPTION_OVERRIDE hook.  */
@@ -539,6 +539,16 @@ pa_option_override (void)
       warning (0, "%<-g%> is only supported when using GAS on this processor");
       warning (0, "%<-g%> option disabled");
       write_symbols = NO_DEBUG;
+    }
+
+  if (TARGET_64BIT && TARGET_HPUX)
+    {
+      /* DWARF5 is not supported by gdb.  Don't emit DWARF5 unless
+	 specifically selected.  */
+      if (!global_options_set.x_dwarf_strict)
+	dwarf_strict = 1;
+      if (!global_options_set.x_dwarf_version)
+	dwarf_version = 4;
     }
 
   /* We only support the "big PIC" model now.  And we always generate PIC
@@ -1492,6 +1502,33 @@ hppa_address_cost (rtx X, machine_mode mode ATTRIBUTE_UNUSED,
     }
 }
 
+/* Return true if X represents a (possibly non-canonical) shNadd pattern.
+   The machine mode of X is known to be SImode or DImode.  */
+
+static bool
+hppa_rtx_costs_shadd_p (rtx x)
+{
+  if (GET_CODE (x) != PLUS
+      || !REG_P (XEXP (x, 1)))
+    return false;
+  rtx op0 = XEXP (x, 0);
+  if (GET_CODE (op0) == ASHIFT
+      && CONST_INT_P (XEXP (op0, 1))
+      && REG_P (XEXP (op0, 0)))
+    {
+      unsigned HOST_WIDE_INT x = UINTVAL (XEXP (op0, 1));
+      return x == 1 || x == 2 || x == 3;
+    }
+  if (GET_CODE (op0) == MULT
+      && CONST_INT_P (XEXP (op0, 1))
+      && REG_P (XEXP (op0, 0)))
+    {
+      unsigned HOST_WIDE_INT x = UINTVAL (XEXP (op0, 1));
+      return x == 2 || x == 4 || x == 8;
+    }
+  return false;
+}
+
 /* Compute a (partial) cost for rtx X.  Return true if the complete
    cost has been computed, and false if subexpressions should be
    scanned.  In either case, *TOTAL contains the cost result.  */
@@ -1499,15 +1536,16 @@ hppa_address_cost (rtx X, machine_mode mode ATTRIBUTE_UNUSED,
 static bool
 hppa_rtx_costs (rtx x, machine_mode mode, int outer_code,
 		int opno ATTRIBUTE_UNUSED,
-		int *total, bool speed ATTRIBUTE_UNUSED)
+		int *total, bool speed)
 {
-  int factor;
   int code = GET_CODE (x);
 
   switch (code)
     {
     case CONST_INT:
-      if (INTVAL (x) == 0)
+      if (outer_code == SET)
+	*total = COSTS_N_INSNS (1);
+      else if (INTVAL (x) == 0)
 	*total = 0;
       else if (INT_14_BITS (x))
 	*total = 1;
@@ -1530,32 +1568,35 @@ hppa_rtx_costs (rtx x, machine_mode mode, int outer_code,
 	  && outer_code != SET)
 	*total = 0;
       else
-        *total = 8;
+	*total = 8;
       return true;
 
     case MULT:
       if (GET_MODE_CLASS (mode) == MODE_FLOAT)
 	{
 	  *total = COSTS_N_INSNS (3);
-	  return true;
 	}
-
-      /* A mode size N times larger than SImode needs O(N*N) more insns.  */
-      factor = GET_MODE_SIZE (mode) / 4;
-      if (factor == 0)
-	factor = 1;
-
-      if (TARGET_PA_11 && !TARGET_DISABLE_FPREGS && !TARGET_SOFT_FLOAT)
-	*total = factor * factor * COSTS_N_INSNS (8);
+      else if (mode == DImode)
+	{
+	  if (TARGET_PA_11 && !TARGET_SOFT_FLOAT && !TARGET_SOFT_MULT)
+	    *total = COSTS_N_INSNS (25);
+	  else
+	    *total = COSTS_N_INSNS (80);
+	}
       else
-	*total = factor * factor * COSTS_N_INSNS (20);
-      return true;
+	{
+	  if (TARGET_PA_11 && !TARGET_SOFT_FLOAT && !TARGET_SOFT_MULT)
+	    *total = COSTS_N_INSNS (8);
+	  else
+	    *total = COSTS_N_INSNS (20);
+	}
+      return REG_P (XEXP (x, 0)) && REG_P (XEXP (x, 1));
 
     case DIV:
       if (GET_MODE_CLASS (mode) == MODE_FLOAT)
 	{
 	  *total = COSTS_N_INSNS (14);
-	  return true;
+	  return false;
 	}
       /* FALLTHRU */
 
@@ -1563,34 +1604,137 @@ hppa_rtx_costs (rtx x, machine_mode mode, int outer_code,
     case MOD:
     case UMOD:
       /* A mode size N times larger than SImode needs O(N*N) more insns.  */
-      factor = GET_MODE_SIZE (mode) / 4;
-      if (factor == 0)
-	factor = 1;
-
-      *total = factor * factor * COSTS_N_INSNS (60);
-      return true;
+      if (mode == DImode)
+	*total = COSTS_N_INSNS (240);
+      else
+	*total = COSTS_N_INSNS (60);
+      return REG_P (XEXP (x, 0)) && REG_P (XEXP (x, 1));
 
     case PLUS: /* this includes shNadd insns */
     case MINUS:
       if (GET_MODE_CLASS (mode) == MODE_FLOAT)
+	*total = COSTS_N_INSNS (3);
+      else if (mode == DImode)
 	{
-	  *total = COSTS_N_INSNS (3);
-	  return true;
+	  if (TARGET_64BIT)
+	    {
+	      *total = COSTS_N_INSNS (1);
+	      /* Handle shladd,l instructions.  */
+	      if (hppa_rtx_costs_shadd_p (x))
+		return true;
+	    }
+	  else
+	    *total = COSTS_N_INSNS (2);
 	}
-
-      /* A size N times larger than UNITS_PER_WORD needs N times as
-	 many insns, taking N times as long.  */
-      factor = GET_MODE_SIZE (mode) / UNITS_PER_WORD;
-      if (factor == 0)
-	factor = 1;
-      *total = factor * COSTS_N_INSNS (1);
-      return true;
+      else
+	{
+	  *total = COSTS_N_INSNS (1);
+	  /* Handle shNadd instructions.  */
+	  if (hppa_rtx_costs_shadd_p (x))
+	    return true;
+	}
+      return REG_P (XEXP (x, 0))
+	     && (REG_P (XEXP (x, 1))
+		 || CONST_INT_P (XEXP (x, 1)));
 
     case ASHIFT:
+      if (mode == DImode)
+	{
+	  if (REG_P (XEXP (x, 0)) && CONST_INT_P (XEXP (x, 1)))
+	    {
+	      if (TARGET_64BIT)
+		*total = COSTS_N_INSNS (1);
+	      else
+		*total = COSTS_N_INSNS (2);
+	      return true;
+	    }
+	  else if (TARGET_64BIT)
+	    *total = COSTS_N_INSNS (3);
+	  else if (speed)
+	    *total = COSTS_N_INSNS (13);
+	  else
+	    *total = COSTS_N_INSNS (18);
+	}
+      else if (REG_P (XEXP (x, 0)) && CONST_INT_P (XEXP (x, 1)))
+	{
+	  if (TARGET_64BIT)
+	    *total = COSTS_N_INSNS (2);
+	  else
+	    *total = COSTS_N_INSNS (1);
+	  return true;
+	}
+      else if (TARGET_64BIT)
+	*total = COSTS_N_INSNS (4);
+      else
+	*total = COSTS_N_INSNS (2);
+      return REG_P (XEXP (x, 0))
+	     && (REG_P (XEXP (x, 1))
+		 || CONST_INT_P (XEXP (x, 1)));
+
     case ASHIFTRT:
+      if (mode == DImode)
+	{
+	  if (REG_P (XEXP (x, 0)) && CONST_INT_P (XEXP (x, 1)))
+	    {
+	      if (TARGET_64BIT)
+		*total = COSTS_N_INSNS (1);
+	      else
+		*total = COSTS_N_INSNS (2);
+	      return true;
+	    }
+	  else if (TARGET_64BIT)
+	    *total = COSTS_N_INSNS (3);
+	  else if (speed)
+	    *total = COSTS_N_INSNS (14);
+	  else
+	    *total = COSTS_N_INSNS (19);
+	}
+      else if (REG_P (XEXP (x, 0)) && CONST_INT_P (XEXP (x, 1)))
+	{
+	  if (TARGET_64BIT)
+	    *total = COSTS_N_INSNS (2);
+	  else
+	    *total = COSTS_N_INSNS (1);
+	  return true;
+	}
+      else if (TARGET_64BIT)
+	*total = COSTS_N_INSNS (4);
+      else
+	*total = COSTS_N_INSNS (2);
+      return REG_P (XEXP (x, 0))
+	     && (REG_P (XEXP (x, 1))
+		 || CONST_INT_P (XEXP (x, 1)));
+
     case LSHIFTRT:
-      *total = COSTS_N_INSNS (1);
-      return true;
+      if (mode == DImode)
+	{
+	  if (REG_P (XEXP (x, 0)) && CONST_INT_P (XEXP (x, 1)))
+	    {
+	      if (TARGET_64BIT)
+		*total = COSTS_N_INSNS (1);
+	      else
+		*total = COSTS_N_INSNS (2);
+	      return true;
+	    }
+	  else if (TARGET_64BIT)
+	    *total = COSTS_N_INSNS (2);
+	  else if (speed)
+	    *total = COSTS_N_INSNS (12);
+	  else
+	    *total = COSTS_N_INSNS (15);
+	}
+      else if (REG_P (XEXP (x, 0)) && CONST_INT_P (XEXP (x, 1)))
+	{
+	  *total = COSTS_N_INSNS (1);
+	  return true;
+	}
+      else if (TARGET_64BIT)
+	*total = COSTS_N_INSNS (3);
+      else
+	*total = COSTS_N_INSNS (2);
+      return REG_P (XEXP (x, 0))
+	     && (REG_P (XEXP (x, 1))
+		 || CONST_INT_P (XEXP (x, 1)));
 
     default:
       return false;
@@ -1631,9 +1775,9 @@ pa_cannot_force_const_mem (machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 int
 pa_emit_move_sequence (rtx *operands, machine_mode mode, rtx scratch_reg)
 {
-  register rtx operand0 = operands[0];
-  register rtx operand1 = operands[1];
-  register rtx tem;
+  rtx operand0 = operands[0];
+  rtx operand1 = operands[1];
+  rtx tem;
 
   /* We can only handle indexed addresses in the destination operand
      of floating point stores.  Thus, we need to break out indexed
@@ -3381,7 +3525,7 @@ pa_output_ascii (FILE *file, const char *p, int size)
       int io = 0;
       for (io = 0, co = 0; io < MIN (4, size - i); io++)
 	{
-	  register unsigned int c = (unsigned char) p[i + io];
+	  unsigned int c = (unsigned char) p[i + io];
 
 	  if (c == '\"' || c == '\\')
 	    partial_output[co++] = '\\';
@@ -5816,7 +5960,7 @@ import_milli (enum millicodes code)
     {
       imported[(int) code] = 1;
       strcpy (str, import_string);
-      strncpy (str + MILLI_START, milli_names[(int) code], 4);
+      memcpy (str + MILLI_START, milli_names[(int) code], 4);
       output_asm_insn (str, 0);
     }
 }
@@ -6406,17 +6550,15 @@ hppa_gimplify_va_arg_expr (tree valist, tree type, gimple_seq *pre_p,
 
 /* True if MODE is valid for the target.  By "valid", we mean able to
    be manipulated in non-trivial ways.  In particular, this means all
-   the arithmetic is supported.
-
-   Currently, TImode is not valid as the HP 64-bit runtime documentation
-   doesn't document the alignment and calling conventions for this type. 
-   Thus, we return false when PRECISION is 2 * BITS_PER_WORD and
-   2 * BITS_PER_WORD isn't equal LONG_LONG_TYPE_SIZE.  */
+   the arithmetic is supported.  */
 
 static bool
 pa_scalar_mode_supported_p (scalar_mode mode)
 {
   int precision = GET_MODE_PRECISION (mode);
+
+  if (TARGET_64BIT && mode == TImode)
+    return true;
 
   switch (GET_MODE_CLASS (mode))
     {
@@ -8327,12 +8469,15 @@ pa_is_function_label_plus_const (rtx op)
 	  && GET_CODE (XEXP (op, 1)) == CONST_INT);
 }
 
-/* Output assembly code for a thunk to FUNCTION.  */
+/* Output the assembler code for a thunk function.  THUNK_DECL is the
+   declaration for the thunk function itself, FUNCTION is the decl for
+   the target function.  DELTA is an immediate constant offset to be
+   added to THIS.  If VCALL_OFFSET is nonzero, the word at
+   *(*this + vcall_offset) should be added to THIS.  */
 
 static void
 pa_asm_output_mi_thunk (FILE *file, tree thunk_fndecl, HOST_WIDE_INT delta,
-			HOST_WIDE_INT vcall_offset ATTRIBUTE_UNUSED,
-			tree function)
+			HOST_WIDE_INT vcall_offset, tree function)
 {
   const char *fnname = IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (thunk_fndecl));
   static unsigned int current_thunk_number;
@@ -8348,201 +8493,386 @@ pa_asm_output_mi_thunk (FILE *file, tree thunk_fndecl, HOST_WIDE_INT delta,
   assemble_start_function (thunk_fndecl, fnname);
   final_start_function (emit_barrier (), file, 1);
 
-  /* Output the thunk.  We know that the function is in the same
-     translation unit (i.e., the same space) as the thunk, and that
-     thunks are output after their method.  Thus, we don't need an
-     external branch to reach the function.  With SOM and GAS,
-     functions and thunks are effectively in different sections.
-     Thus, we can always use a IA-relative branch and the linker
-     will add a long branch stub if necessary.
-
-     However, we have to be careful when generating PIC code on the
-     SOM port to ensure that the sequence does not transfer to an
-     import stub for the target function as this could clobber the
-     return value saved at SP-24.  This would also apply to the
-     32-bit linux port if the multi-space model is implemented.  */
-  if ((!TARGET_LONG_CALLS && TARGET_SOM && !TARGET_PORTABLE_RUNTIME
-       && !(flag_pic && TREE_PUBLIC (function))
-       && (TARGET_GAS || last_address < 262132))
-      || (!TARGET_LONG_CALLS && !TARGET_SOM && !TARGET_PORTABLE_RUNTIME
-	  && ((targetm_common.have_named_sections
-	       && DECL_SECTION_NAME (thunk_fndecl) != NULL
-	       /* The GNU 64-bit linker has rather poor stub management.
-		  So, we use a long branch from thunks that aren't in
-		  the same section as the target function.  */
-	       && ((!TARGET_64BIT
-		    && (DECL_SECTION_NAME (thunk_fndecl)
-			!= DECL_SECTION_NAME (function)))
-		   || ((DECL_SECTION_NAME (thunk_fndecl)
-			== DECL_SECTION_NAME (function))
-		       && last_address < 262132)))
-	      /* In this case, we need to be able to reach the start of
-		 the stub table even though the function is likely closer
-		 and can be jumped to directly.  */
-	      || (targetm_common.have_named_sections
-		  && DECL_SECTION_NAME (thunk_fndecl) == NULL
-		  && DECL_SECTION_NAME (function) == NULL
-		  && total_code_bytes < MAX_PCREL17F_OFFSET)
-	      /* Likewise.  */
-	      || (!targetm_common.have_named_sections
-		  && total_code_bytes < MAX_PCREL17F_OFFSET))))
+  if (!vcall_offset)
     {
-      if (!val_14)
-	output_asm_insn ("addil L'%2,%%r26", xoperands);
+      /* Output the thunk.  We know that the function is in the same
+	 translation unit (i.e., the same space) as the thunk, and that
+	 thunks are output after their method.  Thus, we don't need an
+	 external branch to reach the function.  With SOM and GAS,
+	 functions and thunks are effectively in different sections.
+	 Thus, we can always use a IA-relative branch and the linker
+	 will add a long branch stub if necessary.
 
-      output_asm_insn ("b %0", xoperands);
-
-      if (val_14)
+	 However, we have to be careful when generating PIC code on the
+	 SOM port to ensure that the sequence does not transfer to an
+	 import stub for the target function as this could clobber the
+	 return value saved at SP-24.  This would also apply to the
+	32-bit linux port if the multi-space model is implemented.  */
+      if ((!TARGET_LONG_CALLS && TARGET_SOM && !TARGET_PORTABLE_RUNTIME
+	   && !(flag_pic && TREE_PUBLIC (function))
+	   && (TARGET_GAS || last_address < 262132))
+	  || (!TARGET_LONG_CALLS && !TARGET_SOM && !TARGET_PORTABLE_RUNTIME
+	      && ((targetm_common.have_named_sections
+		   && DECL_SECTION_NAME (thunk_fndecl) != NULL
+		   /* The GNU 64-bit linker has rather poor stub management.
+		      So, we use a long branch from thunks that aren't in
+		      the same section as the target function.  */
+		    && ((!TARGET_64BIT
+			 && (DECL_SECTION_NAME (thunk_fndecl)
+			     != DECL_SECTION_NAME (function)))
+			|| ((DECL_SECTION_NAME (thunk_fndecl)
+			     == DECL_SECTION_NAME (function))
+			    && last_address < 262132)))
+		  /* In this case, we need to be able to reach the start of
+		     the stub table even though the function is likely closer
+		     and can be jumped to directly.  */
+		  || (targetm_common.have_named_sections
+		      && DECL_SECTION_NAME (thunk_fndecl) == NULL
+		      && DECL_SECTION_NAME (function) == NULL
+		      && total_code_bytes < MAX_PCREL17F_OFFSET)
+		  /* Likewise.  */
+		  || (!targetm_common.have_named_sections
+		      && total_code_bytes < MAX_PCREL17F_OFFSET))))
 	{
-	  output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
-	  nbytes += 8;
+	  if (!val_14)
+	    output_asm_insn ("addil L'%2,%%r26", xoperands);
+
+	  output_asm_insn ("b %0", xoperands);
+
+	  if (val_14)
+	    {
+	      output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
+	      nbytes += 8;
+	    }
+	  else
+	    {
+	      output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
+	      nbytes += 12;
+	    }
+	}
+      else if (TARGET_64BIT)
+	{
+	  rtx xop[4];
+
+	  /* We only have one call-clobbered scratch register, so we can't
+	     make use of the delay slot if delta doesn't fit in 14 bits.  */
+	  if (!val_14)
+	    {
+	      output_asm_insn ("addil L'%2,%%r26", xoperands);
+	      output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
+	    }
+
+	  /* Load function address into %r1.  */
+	  xop[0] = xoperands[0];
+	  xop[1] = gen_rtx_REG (Pmode, 1);
+	  xop[2] = xop[1];
+	  pa_output_pic_pcrel_sequence (xop);
+
+	  if (val_14)
+	    {
+	      output_asm_insn ("bv %%r0(%%r1)", xoperands);
+	      output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
+	      nbytes += 20;
+	    }
+	  else
+	    {
+	      output_asm_insn ("bv,n %%r0(%%r1)", xoperands);
+	      nbytes += 24;
+	    }
+	}
+      else if (TARGET_PORTABLE_RUNTIME)
+	{
+	  output_asm_insn ("ldil L'%0,%%r1", xoperands);
+	  output_asm_insn ("ldo R'%0(%%r1),%%r22", xoperands);
+
+	  if (!val_14)
+	    output_asm_insn ("ldil L'%2,%%r26", xoperands);
+
+	  output_asm_insn ("bv %%r0(%%r22)", xoperands);
+
+	  if (val_14)
+	    {
+	      output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
+	      nbytes += 16;
+	    }
+	  else
+	    {
+	      output_asm_insn ("ldo R'%2(%%r26),%%r26", xoperands);
+	      nbytes += 20;
+	    }
+	}
+      else if (TARGET_SOM && flag_pic && TREE_PUBLIC (function))
+	{
+	  /* The function is accessible from outside this module.  The only
+	     way to avoid an import stub between the thunk and function is to
+	     call the function directly with an indirect sequence similar to
+	     that used by $$dyncall.  This is possible because $$dyncall acts
+	     as the import stub in an indirect call.  */
+	  ASM_GENERATE_INTERNAL_LABEL (label, "LTHN", current_thunk_number);
+	  xoperands[3] = gen_rtx_SYMBOL_REF (Pmode, label);
+	  output_asm_insn ("addil LT'%3,%%r19", xoperands);
+	  output_asm_insn ("ldw RT'%3(%%r1),%%r22", xoperands);
+	  output_asm_insn ("ldw 0(%%sr0,%%r22),%%r22", xoperands);
+	  output_asm_insn ("bb,>=,n %%r22,30,.+16", xoperands);
+	  output_asm_insn ("depi 0,31,2,%%r22", xoperands);
+	  output_asm_insn ("ldw 4(%%sr0,%%r22),%%r19", xoperands);
+	  output_asm_insn ("ldw 0(%%sr0,%%r22),%%r22", xoperands);
+
+	  if (!val_14)
+	    {
+	      output_asm_insn ("addil L'%2,%%r26", xoperands);
+	      nbytes += 4;
+	    }
+
+	  if (TARGET_PA_20)
+	    {
+	      output_asm_insn ("bve (%%r22)", xoperands);
+	      nbytes += 36;
+	    }
+	  else if (TARGET_NO_SPACE_REGS)
+	    {
+	      output_asm_insn ("be 0(%%sr4,%%r22)", xoperands);
+	      nbytes += 36;
+	    }
+	  else
+	    {
+	      output_asm_insn ("ldsid (%%sr0,%%r22),%%r21", xoperands);
+	      output_asm_insn ("mtsp %%r21,%%sr0", xoperands);
+	      output_asm_insn ("be 0(%%sr0,%%r22)", xoperands);
+	      nbytes += 44;
+	    }
+
+	  if (val_14)
+	    output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
+	  else
+	    output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
+	}
+      else if (flag_pic)
+	{
+	  rtx xop[4];
+
+	  /* Load function address into %r22.  */
+	  xop[0] = xoperands[0];
+	  xop[1] = gen_rtx_REG (Pmode, 1);
+	  xop[2] = gen_rtx_REG (Pmode, 22);
+	  pa_output_pic_pcrel_sequence (xop);
+
+	  if (!val_14)
+	    output_asm_insn ("addil L'%2,%%r26", xoperands);
+
+	  output_asm_insn ("bv %%r0(%%r22)", xoperands);
+
+	  if (val_14)
+	    {
+	      output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
+	      nbytes += 20;
+	    }
+	  else
+	    {
+	      output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
+	      nbytes += 24;
+	    }
 	}
       else
 	{
-	  output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
-	  nbytes += 12;
-	}
-    }
-  else if (TARGET_64BIT)
-    {
-      rtx xop[4];
+	  if (!val_14)
+	    output_asm_insn ("addil L'%2,%%r26", xoperands);
 
-      /* We only have one call-clobbered scratch register, so we can't
-         make use of the delay slot if delta doesn't fit in 14 bits.  */
-      if (!val_14)
-	{
-	  output_asm_insn ("addil L'%2,%%r26", xoperands);
-	  output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
-	}
+	  output_asm_insn ("ldil L'%0,%%r22", xoperands);
+	  output_asm_insn ("be R'%0(%%sr4,%%r22)", xoperands);
 
-      /* Load function address into %r1.  */
-      xop[0] = xoperands[0];
-      xop[1] = gen_rtx_REG (Pmode, 1);
-      xop[2] = xop[1];
-      pa_output_pic_pcrel_sequence (xop);
-
-      if (val_14)
-	{
-	  output_asm_insn ("bv %%r0(%%r1)", xoperands);
-	  output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
-	  nbytes += 20;
-	}
-      else
-	{
-	  output_asm_insn ("bv,n %%r0(%%r1)", xoperands);
-	  nbytes += 24;
-	}
-    }
-  else if (TARGET_PORTABLE_RUNTIME)
-    {
-      output_asm_insn ("ldil L'%0,%%r1", xoperands);
-      output_asm_insn ("ldo R'%0(%%r1),%%r22", xoperands);
-
-      if (!val_14)
-	output_asm_insn ("ldil L'%2,%%r26", xoperands);
-
-      output_asm_insn ("bv %%r0(%%r22)", xoperands);
-
-      if (val_14)
-	{
-	  output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
-	  nbytes += 16;
-	}
-      else
-	{
-	  output_asm_insn ("ldo R'%2(%%r26),%%r26", xoperands);
-	  nbytes += 20;
-	}
-    }
-  else if (TARGET_SOM && flag_pic && TREE_PUBLIC (function))
-    {
-      /* The function is accessible from outside this module.  The only
-	 way to avoid an import stub between the thunk and function is to
-	 call the function directly with an indirect sequence similar to
-	 that used by $$dyncall.  This is possible because $$dyncall acts
-	 as the import stub in an indirect call.  */
-      ASM_GENERATE_INTERNAL_LABEL (label, "LTHN", current_thunk_number);
-      xoperands[3] = gen_rtx_SYMBOL_REF (Pmode, label);
-      output_asm_insn ("addil LT'%3,%%r19", xoperands);
-      output_asm_insn ("ldw RT'%3(%%r1),%%r22", xoperands);
-      output_asm_insn ("ldw 0(%%sr0,%%r22),%%r22", xoperands);
-      output_asm_insn ("bb,>=,n %%r22,30,.+16", xoperands);
-      output_asm_insn ("depi 0,31,2,%%r22", xoperands);
-      output_asm_insn ("ldw 4(%%sr0,%%r22),%%r19", xoperands);
-      output_asm_insn ("ldw 0(%%sr0,%%r22),%%r22", xoperands);
-
-      if (!val_14)
-	{
-	  output_asm_insn ("addil L'%2,%%r26", xoperands);
-	  nbytes += 4;
-	}
-
-      if (TARGET_PA_20)
-	{
-	  output_asm_insn ("bve (%%r22)", xoperands);
-	  nbytes += 36;
-	}
-      else if (TARGET_NO_SPACE_REGS)
-	{
-	  output_asm_insn ("be 0(%%sr4,%%r22)", xoperands);
-	  nbytes += 36;
-	}
-      else
-	{
-	  output_asm_insn ("ldsid (%%sr0,%%r22),%%r21", xoperands);
-	  output_asm_insn ("mtsp %%r21,%%sr0", xoperands);
-	  output_asm_insn ("be 0(%%sr0,%%r22)", xoperands);
-	  nbytes += 44;
-	}
-
-      if (val_14)
-	output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
-      else
-	output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
-    }
-  else if (flag_pic)
-    {
-      rtx xop[4];
-
-      /* Load function address into %r22.  */
-      xop[0] = xoperands[0];
-      xop[1] = gen_rtx_REG (Pmode, 1);
-      xop[2] = gen_rtx_REG (Pmode, 22);
-      pa_output_pic_pcrel_sequence (xop);
-
-      if (!val_14)
-	output_asm_insn ("addil L'%2,%%r26", xoperands);
-
-      output_asm_insn ("bv %%r0(%%r22)", xoperands);
-
-      if (val_14)
-	{
-	  output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
-	  nbytes += 20;
-	}
-      else
-	{
-	  output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
-	  nbytes += 24;
+	  if (val_14)
+	    {
+	      output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
+	      nbytes += 12;
+	    }
+	  else
+	    {
+	      output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
+	      nbytes += 16;
+	    }
 	}
     }
   else
     {
-      if (!val_14)
-	output_asm_insn ("addil L'%2,%%r26", xoperands);
+      rtx xop[4];
 
-      output_asm_insn ("ldil L'%0,%%r22", xoperands);
-      output_asm_insn ("be R'%0(%%sr4,%%r22)", xoperands);
-
+      /* Add DELTA to THIS.  */
       if (val_14)
 	{
 	  output_asm_insn ("ldo %2(%%r26),%%r26", xoperands);
-	  nbytes += 12;
+	  nbytes += 4;
 	}
       else
 	{
+	  output_asm_insn ("addil L'%2,%%r26", xoperands);
 	  output_asm_insn ("ldo R'%2(%%r1),%%r26", xoperands);
+	  nbytes += 8;
+	}
+
+      if (TARGET_64BIT)
+	{
+	  /* Load *(THIS + DELTA) to %r1.  */
+	  output_asm_insn ("ldd 0(%%r26),%%r1", xoperands);
+
+	  val_14 = VAL_14_BITS_P (vcall_offset);
+	  xoperands[2] = GEN_INT (vcall_offset);
+
+	  /* Load  *(*(THIS + DELTA) + VCALL_OFFSET) to %r1.  */
+	  if (val_14)
+	    {
+	      output_asm_insn ("ldd %2(%%r1),%%r1", xoperands);
+	      nbytes += 8;
+	    }
+	  else
+	    {
+	      output_asm_insn ("addil L'%2,%%r1", xoperands);
+	      output_asm_insn ("ldd R'%2(%%r1),%%r1", xoperands);
+	      nbytes += 12;
+	    }
+	}
+      else
+	{
+	  /* Load *(THIS + DELTA) to %r1.  */
+	  output_asm_insn ("ldw 0(%%r26),%%r1", xoperands);
+
+	  val_14 = VAL_14_BITS_P (vcall_offset);
+	  xoperands[2] = GEN_INT (vcall_offset);
+
+	  /* Load  *(*(THIS + DELTA) + VCALL_OFFSET) to %r1.  */
+	  if (val_14)
+	    {
+	      output_asm_insn ("ldw %2(%%r1),%%r1", xoperands);
+	      nbytes += 8;
+	    }
+	  else
+	    {
+	      output_asm_insn ("addil L'%2,%%r1", xoperands);
+	      output_asm_insn ("ldw R'%2(%%r1),%%r1", xoperands);
+	      nbytes += 12;
+	    }
+	}
+
+      /* Branch to FUNCTION and add %r1 to THIS in delay slot if possible.  */
+      if ((!TARGET_LONG_CALLS && TARGET_SOM && !TARGET_PORTABLE_RUNTIME
+	   && !(flag_pic && TREE_PUBLIC (function))
+	   && (TARGET_GAS || last_address < 262132))
+	  || (!TARGET_LONG_CALLS && !TARGET_SOM && !TARGET_PORTABLE_RUNTIME
+	      && ((targetm_common.have_named_sections
+		   && DECL_SECTION_NAME (thunk_fndecl) != NULL
+		   /* The GNU 64-bit linker has rather poor stub management.
+		      So, we use a long branch from thunks that aren't in
+		      the same section as the target function.  */
+		    && ((!TARGET_64BIT
+			 && (DECL_SECTION_NAME (thunk_fndecl)
+			     != DECL_SECTION_NAME (function)))
+			|| ((DECL_SECTION_NAME (thunk_fndecl)
+			     == DECL_SECTION_NAME (function))
+			    && last_address < 262132)))
+		  /* In this case, we need to be able to reach the start of
+		     the stub table even though the function is likely closer
+		     and can be jumped to directly.  */
+		  || (targetm_common.have_named_sections
+		      && DECL_SECTION_NAME (thunk_fndecl) == NULL
+		      && DECL_SECTION_NAME (function) == NULL
+		      && total_code_bytes < MAX_PCREL17F_OFFSET)
+		  /* Likewise.  */
+		  || (!targetm_common.have_named_sections
+		      && total_code_bytes < MAX_PCREL17F_OFFSET))))
+	{
+	  nbytes += 4;
+	  output_asm_insn ("b %0", xoperands);
+
+	  /* Add *(*(THIS + DELTA) + VCALL_OFFSET) to THIS.  */
+	  output_asm_insn ("addl %%r1,%%r26,%%r26", xoperands);
+	}
+      else if (TARGET_64BIT)
+	{
+	  /* Add *(*(THIS + DELTA) + VCALL_OFFSET) to THIS.  */
+	  output_asm_insn ("addl %%r1,%%r26,%%r26", xoperands);
+
+	  /* Load function address into %r1.  */
 	  nbytes += 16;
+	  xop[0] = xoperands[0];
+	  xop[1] = gen_rtx_REG (Pmode, 1);
+	  xop[2] = xop[1];
+	  pa_output_pic_pcrel_sequence (xop);
+
+	  output_asm_insn ("bv,n %%r0(%%r1)", xoperands);
+	}
+      else if (TARGET_PORTABLE_RUNTIME)
+	{
+	  /* Load function address into %r22.  */
+	  nbytes += 12;
+	  output_asm_insn ("ldil L'%0,%%r22", xoperands);
+	  output_asm_insn ("ldo R'%0(%%r22),%%r22", xoperands);
+
+	  output_asm_insn ("bv %%r0(%%r22)", xoperands);
+
+	  /* Add *(*(THIS + DELTA) + VCALL_OFFSET) to THIS.  */
+	  output_asm_insn ("addl %%r1,%%r26,%%r26", xoperands);
+	}
+      else if (TARGET_SOM && flag_pic && TREE_PUBLIC (function))
+	{
+	  /* Add *(*(THIS + DELTA) + VCALL_OFFSET) to THIS.  */
+	  output_asm_insn ("addl %%r1,%%r26,%%r26", xoperands);
+
+	  /* The function is accessible from outside this module.  The only
+	     way to avoid an import stub between the thunk and function is to
+	     call the function directly with an indirect sequence similar to
+	     that used by $$dyncall.  This is possible because $$dyncall acts
+	     as the import stub in an indirect call.  */
+	  ASM_GENERATE_INTERNAL_LABEL (label, "LTHN", current_thunk_number);
+	  xoperands[3] = gen_rtx_SYMBOL_REF (Pmode, label);
+	  output_asm_insn ("addil LT'%3,%%r19", xoperands);
+	  output_asm_insn ("ldw RT'%3(%%r1),%%r22", xoperands);
+	  output_asm_insn ("ldw 0(%%sr0,%%r22),%%r22", xoperands);
+	  output_asm_insn ("bb,>=,n %%r22,30,.+16", xoperands);
+	  output_asm_insn ("depi 0,31,2,%%r22", xoperands);
+	  output_asm_insn ("ldw 4(%%sr0,%%r22),%%r19", xoperands);
+	  output_asm_insn ("ldw 0(%%sr0,%%r22),%%r22", xoperands);
+
+	  if (TARGET_PA_20)
+	    {
+	      output_asm_insn ("bve,n (%%r22)", xoperands);
+	      nbytes += 32;
+	    }
+	  else if (TARGET_NO_SPACE_REGS)
+	    {
+	      output_asm_insn ("be,n 0(%%sr4,%%r22)", xoperands);
+	      nbytes += 32;
+	    }
+	  else
+	    {
+	      output_asm_insn ("ldsid (%%sr0,%%r22),%%r21", xoperands);
+	      output_asm_insn ("mtsp %%r21,%%sr0", xoperands);
+	      output_asm_insn ("be,n 0(%%sr0,%%r22)", xoperands);
+	      nbytes += 40;
+	    }
+	}
+      else if (flag_pic)
+	{
+	  /* Add *(*(THIS + DELTA) + VCALL_OFFSET) to THIS.  */
+	  output_asm_insn ("addl %%r1,%%r26,%%r26", xoperands);
+
+	  /* Load function address into %r1.  */
+	  nbytes += 16;
+	  xop[0] = xoperands[0];
+	  xop[1] = gen_rtx_REG (Pmode, 1);
+	  xop[2] = xop[1];
+	  pa_output_pic_pcrel_sequence (xop);
+
+	  output_asm_insn ("bv,n %%r0(%%r1)", xoperands);
+	}
+      else
+	{
+	  /* Load function address into %r22.  */
+	  nbytes += 8;
+	  output_asm_insn ("ldil L'%0,%%r22", xoperands);
+	  output_asm_insn ("be R'%0(%%sr4,%%r22)", xoperands);
+
+	  /* Add *(*(THIS + DELTA) + VCALL_OFFSET) to THIS.  */
+	  output_asm_insn ("addl %%r1,%%r26,%%r26", xoperands);
 	}
     }
 
@@ -10297,7 +10627,7 @@ pa_conditional_register_usage (void)
       for (i = 33; i < 56; i += 2)
 	fixed_regs[i] = call_used_regs[i] = 1;
     }
-  if (TARGET_DISABLE_FPREGS || TARGET_SOFT_FLOAT)
+  if (TARGET_SOFT_FLOAT)
     {
       for (i = FP_REG_FIRST; i <= FP_REG_LAST; i++)
 	fixed_regs[i] = call_used_regs[i] = 1;
@@ -10693,82 +11023,6 @@ pa_output_addr_diff_vec (rtx lab, rtx body)
     }
   if (TARGET_GAS)
     fputs ("\t.end_brtab\n", asm_out_file);
-}
-
-/* This is a helper function for the other atomic operations.  This function
-   emits a loop that contains SEQ that iterates until a compare-and-swap
-   operation at the end succeeds.  MEM is the memory to be modified.  SEQ is
-   a set of instructions that takes a value from OLD_REG as an input and
-   produces a value in NEW_REG as an output.  Before SEQ, OLD_REG will be
-   set to the current contents of MEM.  After SEQ, a compare-and-swap will
-   attempt to update MEM with NEW_REG.  The function returns true when the
-   loop was generated successfully.  */
-
-static bool
-pa_expand_compare_and_swap_loop (rtx mem, rtx old_reg, rtx new_reg, rtx seq)
-{
-  machine_mode mode = GET_MODE (mem);
-  rtx_code_label *label;
-  rtx cmp_reg, success, oldval;
-
-  /* The loop we want to generate looks like
-
-        cmp_reg = mem;
-      label:
-        old_reg = cmp_reg;
-        seq;
-        (success, cmp_reg) = compare-and-swap(mem, old_reg, new_reg)
-        if (success)
-          goto label;
-
-     Note that we only do the plain load from memory once.  Subsequent
-     iterations use the value loaded by the compare-and-swap pattern.  */
-
-  label = gen_label_rtx ();
-  cmp_reg = gen_reg_rtx (mode);
-
-  emit_move_insn (cmp_reg, mem);
-  emit_label (label);
-  emit_move_insn (old_reg, cmp_reg);
-  if (seq)
-    emit_insn (seq);
-
-  success = NULL_RTX;
-  oldval = cmp_reg;
-  if (!expand_atomic_compare_and_swap (&success, &oldval, mem, old_reg,
-                                       new_reg, false, MEMMODEL_SYNC_SEQ_CST,
-                                       MEMMODEL_RELAXED))
-    return false;
-
-  if (oldval != cmp_reg)
-    emit_move_insn (cmp_reg, oldval);
-
-  /* Mark this jump predicted not taken.  */
-  emit_cmp_and_jump_insns (success, const0_rtx, EQ, const0_rtx,
-                           GET_MODE (success), 1, label,
-			   profile_probability::guessed_never ());
-  return true;
-}
-
-/* This function tries to implement an atomic exchange operation using a 
-   compare_and_swap loop. VAL is written to *MEM.  The previous contents of
-   *MEM are returned, using TARGET if possible.  No memory model is required
-   since a compare_and_swap loop is seq-cst.  */
-
-rtx
-pa_maybe_emit_compare_and_swap_exchange_loop (rtx target, rtx mem, rtx val)
-{
-  machine_mode mode = GET_MODE (mem);
-
-  if (can_compare_and_swap_p (mode, true))
-    {
-      if (!target || !register_operand (target, mode))
-        target = gen_reg_rtx (mode);
-      if (pa_expand_compare_and_swap_loop (mem, target, val, NULL_RTX))
-        return target;
-    }
-
-  return NULL_RTX;
 }
 
 /* Implement TARGET_CALLEE_COPIES.  The callee is responsible for copying

@@ -2,7 +2,7 @@
 
    Contributed by Evgeny Stupachenko <evstupac@gmail.com>
 
-   Copyright (C) 2015-2020 Free Software Foundation, Inc.
+   Copyright (C) 2015-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -170,17 +170,20 @@ create_dispatcher_calls (struct cgraph_node *node)
 				      clone_function_name_numbered (
 					  node->decl, "default"));
 
-  /* FIXME: copy of cgraph_node::make_local that should be cleaned up
-	    in next stage1.  */
-  node->make_decl_local ();
-  node->set_section (NULL);
-  node->set_comdat_group (NULL);
-  node->externally_visible = false;
-  node->forced_by_abi = false;
-  node->set_section (NULL);
+  if (node->definition)
+    {
+      /* FIXME: copy of cgraph_node::make_local that should be cleaned up
+		in next stage1.  */
+      node->make_decl_local ();
+      node->set_section (NULL);
+      node->set_comdat_group (NULL);
+      node->externally_visible = false;
+      node->forced_by_abi = false;
+      node->set_section (NULL);
 
-  DECL_ARTIFICIAL (node->decl) = 1;
-  node->force_output = true;
+      DECL_ARTIFICIAL (node->decl) = 1;
+      node->force_output = true;
+    }
 }
 
 /* Return length of attribute names string,
@@ -483,7 +486,8 @@ redirect_to_specific_clone (cgraph_node *node)
 					    DECL_ATTRIBUTES (e->callee->decl));
 
       /* Function is not calling proper target clone.  */
-      if (!attribute_list_equal (attr_target, attr_target2))
+      if (attr_target2 == NULL_TREE
+	  || !attribute_value_equal (attr_target, attr_target2))
 	{
 	  while (fv2->prev != NULL)
 	    fv2 = fv2->prev;
@@ -494,7 +498,8 @@ redirect_to_specific_clone (cgraph_node *node)
 	      cgraph_node *callee = fv2->this_node;
 	      attr_target2 = lookup_attribute ("target",
 					       DECL_ATTRIBUTES (callee->decl));
-	      if (attribute_list_equal (attr_target, attr_target2))
+	      if (attr_target2 != NULL_TREE
+		  && attribute_value_equal (attr_target, attr_target2))
 		{
 		  e->redirect_callee (callee);
 		  cgraph_edge::redirect_call_stmt_to_callee (e);

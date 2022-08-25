@@ -1,5 +1,5 @@
 /* Miscellaneous SSA utility functions.
-   Copyright (C) 2001-2020 Free Software Foundation, Inc.
+   Copyright (C) 2001-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -607,7 +607,7 @@ release_defs_bitset (bitmap toremove)
 		}
 
 	      if (!remove_now)
-		BREAK_FROM_IMM_USE_STMT (uit);
+		break;
 	    }
 
 	  if (remove_now)
@@ -987,6 +987,12 @@ verify_phi_args (gphi *phi, basic_block bb, basic_block *definition_block)
 	  err = true;
 	}
 
+      if ((e->flags & EDGE_ABNORMAL) && TREE_CODE (op) != SSA_NAME)
+	{
+	  error ("PHI argument on abnormal edge is not SSA_NAME");
+	  err = true;
+	}
+
       if (TREE_CODE (op) == SSA_NAME)
 	{
 	  err = verify_ssa_name (op, virtual_operand_p (gimple_phi_result (phi)));
@@ -1212,15 +1218,16 @@ err:
 #  pragma GCC diagnostic pop
 #endif
 
-/* Initialize global DFA and SSA structures.  */
+/* Initialize global DFA and SSA structures.
+   If SIZE is non-zero allocated ssa names array of a given size.  */
 
 void
-init_tree_ssa (struct function *fn)
+init_tree_ssa (struct function *fn, int size)
 {
   fn->gimple_df = ggc_cleared_alloc<gimple_df> ();
   fn->gimple_df->default_defs = hash_table<ssa_name_hasher>::create_ggc (20);
   pt_solution_reset (&fn->gimple_df->escaped);
-  init_ssanames (fn, 0);
+  init_ssanames (fn, size);
 }
 
 /* Deallocate memory associated with SSA data structures for FNDECL.  */
@@ -1583,8 +1590,8 @@ non_rewritable_lvalue_p (tree lhs)
   return true;
 }
 
-/* When possible, clear TREE_ADDRESSABLE bit or set DECL_GIMPLE_REG_P bit and
-   mark the variable VAR for conversion into SSA.  Return true when updating
+/* When possible, clear TREE_ADDRESSABLE bit, set or clear DECL_NOT_GIMPLE_REG_P
+   and mark the variable VAR for conversion into SSA.  Return true when updating
    stmts is required.  */
 
 static void
@@ -1597,24 +1604,11 @@ maybe_optimize_var (tree var, bitmap addresses_taken, bitmap not_reg_needs,
       || bitmap_bit_p (addresses_taken, DECL_UID (var)))
     return;
 
-  if (TREE_ADDRESSABLE (var)
-      /* Do not change TREE_ADDRESSABLE if we need to preserve var as
-	 a non-register.  Otherwise we are confused and forget to
-	 add virtual operands for it.  */
-      && (!is_gimple_reg_type (TREE_TYPE (var))
-	  || TREE_CODE (TREE_TYPE (var)) == VECTOR_TYPE
-	  || TREE_CODE (TREE_TYPE (var)) == COMPLEX_TYPE
-	  || !bitmap_bit_p (not_reg_needs, DECL_UID (var))))
+  bool maybe_reg = false;
+  if (TREE_ADDRESSABLE (var))
     {
       TREE_ADDRESSABLE (var) = 0;
-      /* If we cleared TREE_ADDRESSABLE make sure DECL_GIMPLE_REG_P
-         is unset if we cannot rewrite the var into SSA.  */
-      if ((TREE_CODE (TREE_TYPE (var)) == VECTOR_TYPE
-	   || TREE_CODE (TREE_TYPE (var)) == COMPLEX_TYPE)
-	  && bitmap_bit_p (not_reg_needs, DECL_UID (var)))
-	DECL_GIMPLE_REG_P (var) = 0;
-      if (is_gimple_reg (var))
-	bitmap_set_bit (suitable_for_renaming, DECL_UID (var));
+      maybe_reg = true;
       if (dump_file)
 	{
 	  fprintf (dump_file, "No longer having address taken: ");
@@ -1623,20 +1617,36 @@ maybe_optimize_var (tree var, bitmap addresses_taken, bitmap not_reg_needs,
 	}
     }
 
-  if (!DECL_GIMPLE_REG_P (var)
-      && !bitmap_bit_p (not_reg_needs, DECL_UID (var))
-      && (TREE_CODE (TREE_TYPE (var)) == COMPLEX_TYPE
-	  || TREE_CODE (TREE_TYPE (var)) == VECTOR_TYPE)
-      && !TREE_THIS_VOLATILE (var)
-      && (!VAR_P (var) || !DECL_HARD_REGISTER (var)))
+  /* For register type decls if we do not have any partial defs
+     we cannot express in SSA form mark them as DECL_NOT_GIMPLE_REG_P
+     as to avoid SSA rewrite.  For the others go ahead and mark
+     them for renaming.  */
+  if (is_gimple_reg_type (TREE_TYPE (var)))
     {
-      DECL_GIMPLE_REG_P (var) = 1;
-      bitmap_set_bit (suitable_for_renaming, DECL_UID (var));
-      if (dump_file)
+      if (bitmap_bit_p (not_reg_needs, DECL_UID (var)))
 	{
-	  fprintf (dump_file, "Now a gimple register: ");
-	  print_generic_expr (dump_file, var);
-	  fprintf (dump_file, "\n");
+	  DECL_NOT_GIMPLE_REG_P (var) = 1;
+	  if (dump_file)
+	    {
+	      fprintf (dump_file, "Has partial defs: ");
+	      print_generic_expr (dump_file, var);
+	      fprintf (dump_file, "\n");
+	    }
+	}
+      else if (DECL_NOT_GIMPLE_REG_P (var))
+	{
+	  maybe_reg = true;
+	  DECL_NOT_GIMPLE_REG_P (var) = 0;
+	}
+      if (maybe_reg && is_gimple_reg (var))
+	{
+	  if (dump_file)
+	    {
+	      fprintf (dump_file, "Now a gimple register: ");
+	      print_generic_expr (dump_file, var);
+	      fprintf (dump_file, "\n");
+	    }
+	  bitmap_set_bit (suitable_for_renaming, DECL_UID (var));
 	}
     }
 }
@@ -1669,7 +1679,8 @@ is_asan_mark_p (gimple *stmt)
   return false;
 }
 
-/* Compute TREE_ADDRESSABLE and DECL_GIMPLE_REG_P for local variables.  */
+/* Compute TREE_ADDRESSABLE and whether we have unhandled partial defs
+   for local variables.  */
 
 void
 execute_update_addresses_taken (void)
@@ -1678,6 +1689,7 @@ execute_update_addresses_taken (void)
   auto_bitmap addresses_taken;
   auto_bitmap not_reg_needs;
   auto_bitmap suitable_for_renaming;
+  bool optimistic_not_addressable = false;
   tree var;
   unsigned i;
 
@@ -1706,6 +1718,8 @@ execute_update_addresses_taken (void)
 		  gimple_call_set_arg (stmt, 1, null_pointer_node);
 		  gimple_ior_addresses_taken (addresses_taken, stmt);
 		  gimple_call_set_arg (stmt, 1, arg);
+		  /* Remember we have to check again below.  */
+		  optimistic_not_addressable = true;
 		}
 	      else if (is_asan_mark_p (stmt)
 		       || gimple_call_internal_p (stmt, IFN_GOMP_SIMT_ENTER))
@@ -1809,7 +1823,8 @@ execute_update_addresses_taken (void)
 
   /* Operand caches need to be recomputed for operands referencing the updated
      variables and operands need to be rewritten to expose bare symbols.  */
-  if (!bitmap_empty_p (suitable_for_renaming))
+  if (!bitmap_empty_p (suitable_for_renaming)
+      || optimistic_not_addressable)
     {
       FOR_EACH_BB_FN (bb, cfun)
 	for (gimple_stmt_iterator gsi = gsi_start_bb (bb); !gsi_end_p (gsi);)
@@ -2000,12 +2015,18 @@ execute_update_addresses_taken (void)
 		if (optimize_atomic_compare_exchange_p (stmt))
 		  {
 		    tree expected = gimple_call_arg (stmt, 1);
-		    if (bitmap_bit_p (suitable_for_renaming,
-				      DECL_UID (TREE_OPERAND (expected, 0))))
+		    tree decl = TREE_OPERAND (expected, 0);
+		    if (bitmap_bit_p (suitable_for_renaming, DECL_UID (decl)))
 		      {
 			fold_builtin_atomic_compare_exchange (&gsi);
 			continue;
 		      }
+		    else if (!TREE_ADDRESSABLE (decl))
+		      /* If there are partial defs of the decl we may
+			 have cleared the addressable bit but set
+			 DECL_NOT_GIMPLE_REG_P.  We have to restore
+			 TREE_ADDRESSABLE here.  */
+		      TREE_ADDRESSABLE (decl) = 1;
 		  }
 		else if (is_asan_mark_p (stmt))
 		  {

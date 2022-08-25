@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -103,6 +103,12 @@ static_assert(std::is_empty_v<decltype(views::common
 				       | views::common
 				       | views::keys
 				       | views::reverse)>);
+#if 0
+// Adding empty range adaptor closure objects to a pipeline used to not
+// increase the size of the pipeline, but now that our range adaptor closure
+// objects derive from a common empty base class, [[no_unique_address]] can no
+// longer make two empty adjacent range adaptor closure objects occupy the same
+// data member address.
 static_assert(sizeof(decltype(views::take(5) | views::drop(5)))
 	      == sizeof(decltype(views::take(5)
 				 | views::join
@@ -111,6 +117,32 @@ static_assert(sizeof(decltype(views::take(5) | views::drop(5)))
 				 | views::keys
 				 | views::drop(5)
 				 | views::reverse)));
+#endif
+
+template<auto all = views::all>
+void
+test05()
+{
+  // Verify SFINAE behavior.
+  static_assert(!requires { all(); });
+  static_assert(!requires { all(0, 0); });
+  static_assert(!requires { all(0); });
+  static_assert(!requires { 0 | all; });
+}
+
+void
+test07()
+{
+  // LWG 3481
+  struct view_t : ranges::empty_view<int> { // move-only view
+    view_t(const view_t&) = delete;
+    view_t(view_t&&) = default;
+    view_t& operator=(const view_t&) = delete;
+    view_t& operator=(view_t&&) = default;
+  };
+  static_assert(std::movable<view_t> && !std::copyable<view_t>);
+  static_assert(!ranges::viewable_range<view_t&>);
+}
 
 int
 main()
@@ -119,4 +151,6 @@ main()
   test02();
   static_assert(test03());
   static_assert(test04());
+  test05();
+  test07();
 }

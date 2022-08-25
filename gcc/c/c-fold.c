@@ -1,5 +1,5 @@
 /* Support for fully folding sub-trees of an expression for C compiler.
-   Copyright (C) 1992-2020 Free Software Foundation, Inc.
+   Copyright (C) 1992-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -382,6 +382,7 @@ c_fully_fold_internal (tree expr, bool in_init, bool *maybe_const_operands,
 	  && TREE_CODE (TREE_TYPE (orig_op0)) == INTEGER_TYPE
 	  && TREE_CODE (op0) == INTEGER_CST
 	  && c_inhibit_evaluation_warnings == 0
+	  && !TYPE_OVERFLOW_WRAPS (TREE_TYPE (orig_op0))
 	  && tree_int_cst_sgn (op0) < 0)
 	warning_at (loc, OPT_Wshift_negative_value,
 		    "left shift of negative value");

@@ -1,5 +1,5 @@
 /* GCC core type declarations.
-   Copyright (C) 2002-2020 Free Software Foundation, Inc.
+   Copyright (C) 2002-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -219,15 +219,25 @@ enum profile_reproducibility {
     PROFILE_REPRODUCIBILITY_MULTITHREADED
 };
 
-/* Types of unwind/exception handling info that can be generated.  */
+/* Type of -fstack-protector-*.  */
+enum stack_protector {
+  SPCT_FLAG_DEFAULT = 1,
+  SPCT_FLAG_ALL = 2,
+  SPCT_FLAG_STRONG = 3,
+  SPCT_FLAG_EXPLICIT = 4
+};
+
+/* Types of unwind/exception handling info that can be generated.
+   Note that a UI_TARGET (or larger) setting is considered to be
+   incompatible with -freorder-blocks-and-partition.  */
 
 enum unwind_info_type
 {
   UI_NONE,
   UI_SJLJ,
   UI_DWARF2,
-  UI_TARGET,
-  UI_SEH
+  UI_SEH,
+  UI_TARGET
 };
 
 /* Callgraph node profile representation.  */
@@ -419,6 +429,18 @@ enum excess_precision_type
   EXCESS_PRECISION_TYPE_FAST
 };
 
+/* Level of size optimization.  */
+
+enum optimize_size_level
+{
+  /* Do not optimize for size.  */
+  OPTIMIZE_SIZE_NO,
+  /* Optimize for size but not at extreme performance costs.  */
+  OPTIMIZE_SIZE_BALANCED,
+  /* Optimize for size as much as possible.  */
+  OPTIMIZE_SIZE_MAX
+};
+
 /* Support for user-provided GGC and PCH markers.  The first parameter
    is a pointer to a pointer, the second a cookie.  */
 typedef void (*gt_pointer_operator) (void *, void *);
@@ -454,6 +476,7 @@ typedef unsigned char uchar;
 #include "align.h"
 /* Most host source files will require the following headers.  */
 #if !defined (GENERATOR_FILE)
+#include "iterator-utils.h"
 #include "real.h"
 #include "fixed-value.h"
 #include "hash-table.h"

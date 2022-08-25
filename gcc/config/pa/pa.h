@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, for the HP Spectrum.
-   Copyright (C) 1992-2020 Free Software Foundation, Inc.
+   Copyright (C) 1992-2021 Free Software Foundation, Inc.
    Contributed by Michael Tiemann (tiemann@cygnus.com) of Cygnus Support
    and Tim Moore (moore@defmacro.cs.utah.edu) of the Center for
    Software Science at the University of Utah.
@@ -255,11 +255,17 @@ typedef struct GTY(()) machine_function
    is UNITS_PER_WORD.  Otherwise, it is the constant value that is the
    smallest value that UNITS_PER_WORD can have at run-time.
 
-   FIXME: This needs to be 4 when TARGET_64BIT is true to suppress the
-   building of various TImode routines in libgcc.  The HP runtime
-   specification doesn't provide the alignment requirements and calling
-   conventions for TImode variables.  */
-#define MIN_UNITS_PER_WORD 4
+   This needs to be 8 when TARGET_64BIT is true to allow building various
+   TImode routines in libgcc.  However, we also need the DImode DIVMOD
+   routines because they are not currently implemented in pa.md.
+   
+   The HP runtime specification doesn't provide the alignment requirements
+   and calling conventions for TImode variables.  */
+#ifdef IN_LIBGCC2
+#define MIN_UNITS_PER_WORD      UNITS_PER_WORD
+#else
+#define MIN_UNITS_PER_WORD      4
+#endif
 
 /* The widest floating point format supported by the hardware.  Note that
    setting this influences some Ada floating point type sizes, currently
@@ -833,7 +839,6 @@ extern int may_call_alloca;
 
 #define INT14_OK_STRICT \
   (TARGET_SOFT_FLOAT                                                   \
-   || TARGET_DISABLE_FPREGS                                            \
    || (TARGET_PA_20 && !TARGET_ELF32))
 
 /* The macros REG_OK_FOR..._P assume that the arg is a REG rtx
@@ -1302,8 +1307,9 @@ do {									     \
 
 #define NEED_INDICATE_EXEC_STACK 0
 
-/* Target CPU versions for D.  */
+/* Target hooks for D language.  */
 #define TARGET_D_CPU_VERSIONS pa_d_target_versions
+#define TARGET_D_REGISTER_CPU_TARGET_INFO pa_d_register_target_info
 
 /* Output default function prologue for hpux.  */
 #define TARGET_ASM_FUNCTION_PROLOGUE pa_output_function_prologue

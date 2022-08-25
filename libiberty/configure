@@ -2458,9 +2458,6 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
 
 
-
-
-
 # This works around the fact that libtool configuration may change LD
 # for this particular configuration, but some shells, instead of
 # keeping the changes in LD private, export them just because LD is
@@ -5264,6 +5261,7 @@ fi
 NOASANFLAG=
 case " ${CFLAGS} " in
   *\ -fsanitize=address\ *) NOASANFLAG=-fno-sanitize=address ;;
+  *\ -fsanitize=hwaddress\ *) NOASANFLAG=-fno-sanitize=hwaddress ;;
 esac
 
 
@@ -5286,12 +5284,12 @@ $as_echo_n "checking for CET support... " >&6; }
 case "$host" in
   i[34567]86-*-linux* | x86_64-*-linux*)
     may_have_cet=yes
-    save_CFLAGS="$CFLAGS"
+    cet_save_CFLAGS="$CFLAGS"
     CFLAGS="$CFLAGS -fcf-protection"
     case "$enable_cet" in
       auto)
 	# Check if target supports multi-byte NOPs
-	# and if assembler supports CET insn.
+	# and if compiler and assembler support CET.
 	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -5317,7 +5315,7 @@ fi
 rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
 	;;
       yes)
-	# Check if assembler supports CET.
+	# Check if compiler and assembler support CET.
 	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -5330,14 +5328,27 @@ asm ("setssbsy");
 }
 _ACEOF
 if ac_fn_c_try_compile "$LINENO"; then :
-
+  support_cet=yes
 else
-  as_fn_error $? "assembler with CET support is required for --enable-cet" "$LINENO" 5
+  support_cet=no
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+	if test $support_cet = "no"; then
+	  if test x$enable_bootstrap != xno \
+	     && test -z "${with_build_subdir}" \
+	     && (test ! -f ../stage_current \
+	         || test `cat ../stage_current` != "stage1"); then
+	    # Require CET support only for the final GCC build.
+	    as_fn_error $? "compiler and assembler with CET support are required for --enable-cet" "$LINENO" 5
+	  else
+	    # Don't enable CET without CET support for non-bootstrap
+	    # build, in stage1 nor for build support.
+	    enable_cet=no
+	  fi
+	fi
 	;;
     esac
-    CFLAGS="$save_CFLAGS"
+    CFLAGS="$cet_save_CFLAGS"
     ;;
   *)
     may_have_cet=no
@@ -5345,9 +5356,9 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
     ;;
 esac
 
-save_CFLAGS="$CFLAGS"
+cet_save_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS -fcf-protection=none"
-save_LDFLAGS="$LDFLAGS"
+cet_save_LDFLAGS="$LDFLAGS"
 LDFLAGS="$LDFLAGS -Wl,-z,ibt,-z,shstk"
 if test x$may_have_cet = xyes; then
   # Check whether -fcf-protection=none -Wl,-z,ibt,-z,shstk work.
@@ -5438,8 +5449,8 @@ else
   { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
 $as_echo "no" >&6; }
 fi
-CFLAGS="$save_CFLAGS"
-LDFLAGS="$save_LDFLAGS"
+CFLAGS="$cet_save_CFLAGS"
+LDFLAGS="$cet_save_LDFLAGS"
 
 
 
@@ -5977,8 +5988,15 @@ vars="sys_errlist sys_nerr sys_siglist"
 
 checkfuncs="__fsetlocking canonicalize_file_name dup3 getrlimit getrusage \
  getsysinfo gettimeofday on_exit pipe2 psignal pstat_getdynamic pstat_getstatic \
- realpath setrlimit sbrk spawnve spawnvpe strerror strsignal sysconf sysctl \
+ realpath setrlimit spawnve spawnvpe strerror strsignal sysconf sysctl \
  sysmp table times wait3 wait4"
+
+# Darwin has sbrk, but it is deprecated and that produces build-time warnings
+# so do not check for it.
+case "${host}" in
+  *-*-darwin*) ;;
+  *) checkfuncs="$checkfuncs sbrk"
+esac
 
 # These are neither executed nor required, but they help keep
 # autoheader happy without adding a bunch of text to acconfig.h.
@@ -6546,6 +6564,22 @@ if test -z "${setobjs}"; then
     # On android, getpagesize is defined in unistd.h as a static inline
     # function, which AC_CHECK_FUNCS does not handle properly.
     ac_cv_func_getpagesize=yes
+    ;;
+
+  hppa*-*-hpux*)
+    # Replace system snprintf and vsnprintf with libiberty implementations.
+    case " $LIBOBJS " in
+  *" snprintf.$ac_objext "* ) ;;
+  *) LIBOBJS="$LIBOBJS snprintf.$ac_objext"
+ ;;
+esac
+
+    case " $LIBOBJS " in
+  *" vsnprintf.$ac_objext "* ) ;;
+  *) LIBOBJS="$LIBOBJS vsnprintf.$ac_objext"
+ ;;
+esac
+
     ;;
 
   *-*-mingw32*)
@@ -7192,7 +7226,10 @@ fi
 cat >>confdefs.h <<_ACEOF
 #define HAVE_DECL_REALLOC $ac_have_decl
 _ACEOF
-ac_fn_c_check_decl "$LINENO" "sbrk" "ac_cv_have_decl_sbrk" "$ac_includes_default"
+
+  case "${host}" in
+      *-*-darwin*) ;; # Darwin's sbrk implementation is deprecated.
+      *) ac_fn_c_check_decl "$LINENO" "sbrk" "ac_cv_have_decl_sbrk" "$ac_includes_default"
 if test "x$ac_cv_have_decl_sbrk" = xyes; then :
   ac_have_decl=1
 else
@@ -7202,7 +7239,8 @@ fi
 cat >>confdefs.h <<_ACEOF
 #define HAVE_DECL_SBRK $ac_have_decl
 _ACEOF
-
+;;
+  esac
   ac_fn_c_check_decl "$LINENO" "strtol" "ac_cv_have_decl_strtol" "$ac_includes_default"
 if test "x$ac_cv_have_decl_strtol" = xyes; then :
   ac_have_decl=1

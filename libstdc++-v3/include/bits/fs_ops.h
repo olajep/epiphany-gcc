@@ -1,6 +1,6 @@
 // Filesystem operational functions -*- C++ -*-
 
-// Copyright (C) 2014-2020 Free Software Foundation, Inc.
+// Copyright (C) 2014-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -22,7 +22,7 @@
 // see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 // <http://www.gnu.org/licenses/>.
 
-/** @file include/bits/fs_fwd.h
+/** @file include/bits/fs_ops.h
  *  This is an internal header file, included by other library headers.
  *  Do not attempt to use it directly. @headername{filesystem}
  */
@@ -302,7 +302,7 @@ namespace filesystem
   path weakly_canonical(const path& __p);
   path weakly_canonical(const path& __p, error_code& __ec);
 
-  // @} group filesystem
+  /// @} group filesystem
 } // namespace filesystem
 
 _GLIBCXX_END_NAMESPACE_VERSION

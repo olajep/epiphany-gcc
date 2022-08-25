@@ -1,6 +1,6 @@
 /* Gimple decl, type, and expression support functions.
 
-   Copyright (C) 2007-2020 Free Software Foundation, Inc.
+   Copyright (C) 2007-2021 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez <aldyh@redhat.com>
 
 This file is part of GCC.
@@ -373,7 +373,7 @@ copy_var_decl (tree var, tree name, tree type)
 
   TREE_ADDRESSABLE (copy) = TREE_ADDRESSABLE (var);
   TREE_THIS_VOLATILE (copy) = TREE_THIS_VOLATILE (var);
-  DECL_GIMPLE_REG_P (copy) = DECL_GIMPLE_REG_P (var);
+  DECL_NOT_GIMPLE_REG_P (copy) = DECL_NOT_GIMPLE_REG_P (var);
   DECL_ARTIFICIAL (copy) = DECL_ARTIFICIAL (var);
   DECL_IGNORED_P (copy) = DECL_IGNORED_P (var);
   DECL_CONTEXT (copy) = DECL_CONTEXT (var);
@@ -493,14 +493,7 @@ create_tmp_var (tree type, const char *prefix)
 tree
 create_tmp_reg (tree type, const char *prefix)
 {
-  tree tmp;
-
-  tmp = create_tmp_var (type, prefix);
-  if (TREE_CODE (type) == COMPLEX_TYPE
-      || TREE_CODE (type) == VECTOR_TYPE)
-    DECL_GIMPLE_REG_P (tmp) = 1;
-
-  return tmp;
+  return create_tmp_var (type, prefix);
 }
 
 /* Create a new temporary variable declaration of type TYPE by calling
@@ -514,9 +507,6 @@ create_tmp_reg_fn (struct function *fn, tree type, const char *prefix)
 
   tmp = create_tmp_var_raw (type, prefix);
   gimple_add_tmp_var_fn (fn, tmp);
-  if (TREE_CODE (type) == COMPLEX_TYPE
-      || TREE_CODE (type) == VECTOR_TYPE)
-    DECL_GIMPLE_REG_P (tmp) = 1;
 
   return tmp;
 }
@@ -612,12 +602,16 @@ is_gimple_lvalue (tree t)
 /* Helper for is_gimple_condexpr and is_gimple_condexpr_for_cond.  */
 
 static bool
-is_gimple_condexpr_1 (tree t, bool allow_traps)
+is_gimple_condexpr_1 (tree t, bool allow_traps, bool allow_cplx)
 {
-  return (is_gimple_val (t) || (COMPARISON_CLASS_P (t)
-				&& (allow_traps || !tree_could_throw_p (t))
-				&& is_gimple_val (TREE_OPERAND (t, 0))
-				&& is_gimple_val (TREE_OPERAND (t, 1))));
+  tree op0;
+  return (is_gimple_val (t)
+	  || (COMPARISON_CLASS_P (t)
+	      && (allow_traps || !tree_could_throw_p (t))
+	      && ((op0 = TREE_OPERAND (t, 0)), true)
+	      && (allow_cplx || TREE_CODE (TREE_TYPE (op0)) != COMPLEX_TYPE)
+	      && is_gimple_val (op0)
+	      && is_gimple_val (TREE_OPERAND (t, 1))));
 }
 
 /* Return true if T is a GIMPLE condition.  */
@@ -625,7 +619,9 @@ is_gimple_condexpr_1 (tree t, bool allow_traps)
 bool
 is_gimple_condexpr (tree t)
 {
-  return is_gimple_condexpr_1 (t, true);
+  /* Always split out _Complex type compares since complex lowering
+     doesn't handle this case.  */
+  return is_gimple_condexpr_1 (t, true, false);
 }
 
 /* Like is_gimple_condexpr, but does not allow T to trap.  */
@@ -633,7 +629,7 @@ is_gimple_condexpr (tree t)
 bool
 is_gimple_condexpr_for_cond (tree t)
 {
-  return is_gimple_condexpr_1 (t, false);
+  return is_gimple_condexpr_1 (t, false, true);
 }
 
 /* Return true if T is a gimple address.  */
@@ -792,13 +788,9 @@ is_gimple_reg (tree t)
   if (TREE_CODE (t) == VAR_DECL && DECL_HARD_REGISTER (t))
     return false;
 
-  /* Complex and vector values must have been put into SSA-like form.
-     That is, no assignments to the individual components.  */
-  if (TREE_CODE (TREE_TYPE (t)) == COMPLEX_TYPE
-      || TREE_CODE (TREE_TYPE (t)) == VECTOR_TYPE)
-    return DECL_GIMPLE_REG_P (t);
-
-  return true;
+  /* Variables can be marked as having partial definitions, avoid
+     putting them into SSA form.  */
+  return !DECL_NOT_GIMPLE_REG_P (t);
 }
 
 

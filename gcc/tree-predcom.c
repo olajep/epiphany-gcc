@@ -1,5 +1,5 @@
 /* Predictive commoning.
-   Copyright (C) 2005-2020 Free Software Foundation, Inc.
+   Copyright (C) 2005-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -737,13 +737,12 @@ static basic_block
 last_always_executed_block (class loop *loop)
 {
   unsigned i;
-  vec<edge> exits = get_loop_exit_edges (loop);
+  auto_vec<edge> exits = get_loop_exit_edges (loop);
   edge ex;
   basic_block last = loop->latch;
 
   FOR_EACH_VEC_ELT (exits, i, ex)
     last = nearest_common_dominator (CDI_DOMINATORS, last, ex->src);
-  exits.release ();
 
   return last;
 }
@@ -1254,7 +1253,6 @@ static gphi *
 find_looparound_phi (class loop *loop, dref ref, dref root)
 {
   tree name, init, init_ref;
-  gphi *phi = NULL;
   gimple *init_stmt;
   edge latch = loop_latch_edge (loop);
   struct data_reference init_dr;
@@ -1272,14 +1270,19 @@ find_looparound_phi (class loop *loop, dref ref, dref root)
   if (!name)
     return NULL;
 
+  tree entry_vuse = NULL_TREE;
+  gphi *phi = NULL;
   for (psi = gsi_start_phis (loop->header); !gsi_end_p (psi); gsi_next (&psi))
     {
-      phi = psi.phi ();
-      if (PHI_ARG_DEF_FROM_EDGE (phi, latch) == name)
+      gphi *p = psi.phi ();
+      if (PHI_ARG_DEF_FROM_EDGE (p, latch) == name)
+	phi = p;
+      else if (virtual_operand_p (gimple_phi_result (p)))
+	entry_vuse = PHI_ARG_DEF_FROM_EDGE (p, loop_preheader_edge (loop));
+      if (phi && entry_vuse)
 	break;
     }
-
-  if (gsi_end_p (psi))
+  if (!phi || !entry_vuse)
     return NULL;
 
   init = PHI_ARG_DEF_FROM_EDGE (phi, loop_preheader_edge (loop));
@@ -1306,6 +1309,30 @@ find_looparound_phi (class loop *loop, dref ref, dref root)
 
   if (!valid_initializer_p (&init_dr, ref->distance + 1, root->ref))
     return NULL;
+
+  /* Make sure nothing clobbers the location we re-use the initial value
+     from.  */
+  if (entry_vuse != gimple_vuse (init_stmt))
+    {
+      ao_ref ref;
+      ao_ref_init (&ref, init_ref);
+      unsigned limit = param_sccvn_max_alias_queries_per_access;
+      tree vdef = entry_vuse;
+      do
+	{
+	  gimple *def = SSA_NAME_DEF_STMT (vdef);
+	  if (limit-- == 0 || gimple_code (def) == GIMPLE_PHI)
+	    return NULL;
+	  if (stmt_may_clobber_ref_p_1 (def, &ref))
+	    /* When the stmt is an assign to init_ref we could in theory
+	       use its RHS for the initial value of the looparound PHI
+	       we replace in prepare_initializers_chain, but we have
+	       no convenient place to store this info at the moment.  */
+	    return NULL;
+	  vdef = gimple_vuse (def);
+	}
+      while (vdef != gimple_vuse (init_stmt));
+    }
 
   return phi;
 }
@@ -1783,7 +1810,7 @@ initialize_root_vars_store_elim_1 (chain_p chain)
   unsigned i, n = chain->length;
 
   chain->vars.create (n);
-  chain->vars.safe_grow_cleared (n);
+  chain->vars.safe_grow_cleared (n, true);
 
   /* Initialize root value for eliminated stores at each distance.  */
   for (i = 0; i < n; i++)
@@ -1843,7 +1870,7 @@ initialize_root_vars_store_elim_2 (class loop *loop,
   /* Root values are either rhs operand of stores to be eliminated, or
      loaded from memory before loop.  */
   auto_vec<tree> vtemps;
-  vtemps.safe_grow_cleared (n);
+  vtemps.safe_grow_cleared (n, true);
   for (i = 0; i < n; i++)
     {
       init = get_init_expr (chain, i);
@@ -2368,7 +2395,7 @@ base_names_in_chain_on (class loop *loop, tree name, tree var)
 	      && flow_bb_inside_loop_p (loop, gimple_bb (stmt)))
 	    {
 	      phi = stmt;
-	      BREAK_FROM_IMM_USE_STMT (iter);
+	      break;
 	    }
 	}
       if (!phi)
@@ -2953,7 +2980,7 @@ prepare_initializers_chain_store_elim (class loop *loop, chain_p chain)
     }
 
   chain->inits.create (n);
-  chain->inits.safe_grow_cleared (n);
+  chain->inits.safe_grow_cleared (n, true);
 
   /* For store eliminatin chain like below:
 
@@ -2971,7 +2998,7 @@ prepare_initializers_chain_store_elim (class loop *loop, chain_p chain)
      elements because loop body is guaranteed to be executed at least once
      after loop's preheader edge.  */
   auto_vec<bool> bubbles;
-  bubbles.safe_grow_cleared (n + 1);
+  bubbles.safe_grow_cleared (n + 1, true);
   for (i = 0; i < chain->refs.length (); i++)
     bubbles[chain->refs[i]->distance] = true;
 

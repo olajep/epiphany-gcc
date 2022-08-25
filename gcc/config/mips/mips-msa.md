@@ -1,7 +1,7 @@
 ;; Machine Description for MIPS MSA ASE
 ;; Based on the MIPS MSA spec Revision 1.11 8/4/2014
 ;;
-;; Copyright (C) 2015-2020 Free Software Foundation, Inc.
+;; Copyright (C) 2015-2021 Free Software Foundation, Inc.
 ;;
 ;; This file is part of GCC.
 ;;
@@ -432,6 +432,28 @@
    && (GET_MODE_NUNITS (<MSA:MODE>mode) == GET_MODE_NUNITS (<MSA_2:MODE>mode))"
 {
   mips_expand_vec_cond_expr (<MSA:MODE>mode, <MSA:VIMODE>mode, operands);
+  DONE;
+})
+
+(define_expand "vec_cmp<MSA:mode><mode_i>"
+  [(match_operand:<VIMODE> 0 "register_operand")
+   (match_operator 1 ""
+     [(match_operand:MSA 2 "register_operand")
+      (match_operand:MSA 3 "register_operand")])]
+  "ISA_HAS_MSA"
+{
+  mips_expand_vec_cmp_expr (operands);
+  DONE;
+})
+
+(define_expand "vec_cmpu<IMSA:mode><mode_i>"
+  [(match_operand:<VIMODE> 0 "register_operand")
+   (match_operator 1 ""
+     [(match_operand:IMSA 2 "register_operand")
+      (match_operand:IMSA 3 "register_operand")])]
+  "ISA_HAS_MSA"
+{
+  mips_expand_vec_cmp_expr (operands);
   DONE;
 })
 

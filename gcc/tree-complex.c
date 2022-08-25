@@ -1,5 +1,5 @@
 /* Lower complex number operations to scalar operations.
-   Copyright (C) 2004-2020 Free Software Foundation, Inc.
+   Copyright (C) 2004-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-hasher.h"
 #include "cfgloop.h"
 #include "cfganal.h"
+#include "diagnostic-core.h"
 
 
 /* For each complex ssa name, a lattice value.  We're interested in finding
@@ -318,7 +319,7 @@ complex_propagate::visit_stmt (gimple *stmt, edge *taken_edge_p ATTRIBUTE_UNUSED
 
   lhs = gimple_get_lhs (stmt);
   /* Skip anything but GIMPLE_ASSIGN and GIMPLE_CALL with a lhs.  */
-  if (!lhs)
+  if (!lhs || SSA_NAME_OCCURS_IN_ABNORMAL_PHI (lhs))
     return SSA_PROP_VARYING;
 
   /* These conditions should be satisfied due to the initial filter
@@ -416,6 +417,9 @@ complex_propagate::visit_phi (gphi *phi)
   /* This condition should be satisfied due to the initial filter
      set up in init_dont_simulate_again.  */
   gcc_assert (TREE_CODE (TREE_TYPE (lhs)) == COMPLEX_TYPE);
+
+  if (SSA_NAME_OCCURS_IN_ABNORMAL_PHI (lhs))
+    return SSA_PROP_VARYING;
 
   /* We've set up the lattice values such that IOR neatly models PHI meet.  */
   new_l = UNINITIALIZED;
@@ -569,7 +573,8 @@ set_component_ssa_name (tree ssa_name, bool imag_p, tree value)
     {
       /* Replace an anonymous base value with the variable from cvc_lookup.
 	 This should result in better debug info.  */
-      if (SSA_NAME_VAR (ssa_name)
+      if (!SSA_NAME_IS_DEFAULT_DEF (value)
+	  && SSA_NAME_VAR (ssa_name)
 	  && (!SSA_NAME_VAR (value) || DECL_IGNORED_P (SSA_NAME_VAR (value)))
 	  && !DECL_IGNORED_P (SSA_NAME_VAR (ssa_name)))
 	{
@@ -1578,6 +1583,7 @@ expand_complex_asm (gimple_stmt_iterator *gsi)
 {
   gasm *stmt = as_a <gasm *> (gsi_stmt (*gsi));
   unsigned int i;
+  bool diagnosed_p = false;
 
   for (i = 0; i < gimple_asm_noutputs (stmt); ++i)
     {
@@ -1586,6 +1592,20 @@ expand_complex_asm (gimple_stmt_iterator *gsi)
       if (TREE_CODE (op) == SSA_NAME
 	  && TREE_CODE (TREE_TYPE (op)) == COMPLEX_TYPE)
 	{
+	  if (gimple_asm_nlabels (stmt) > 0)
+	    {
+	      if (!diagnosed_p)
+		{
+		  sorry_at (gimple_location (stmt),
+			    "%<asm goto%> with complex typed outputs");
+		  diagnosed_p = true;
+		}
+	      /* Make sure to not ICE later, see PR105165.  */
+	      tree zero = build_zero_cst (TREE_TYPE (TREE_TYPE (op)));
+	      set_component_ssa_name (op, false, zero);
+	      set_component_ssa_name (op, true, zero);
+	      continue;
+	    }
 	  tree type = TREE_TYPE (op);
 	  tree inner_type = TREE_TYPE (type);
 	  tree r = build1 (REALPART_EXPR, inner_type, op);
@@ -1776,7 +1796,7 @@ tree_lower_complex (void)
     return 0;
 
   complex_lattice_values.create (num_ssa_names);
-  complex_lattice_values.safe_grow_cleared (num_ssa_names);
+  complex_lattice_values.safe_grow_cleared (num_ssa_names, true);
 
   init_parameter_lattice_values ();
   class complex_propagate complex_propagate;
@@ -1787,7 +1807,7 @@ tree_lower_complex (void)
   complex_variable_components = new int_tree_htab_type (10);
 
   complex_ssa_name_components.create (2 * num_ssa_names);
-  complex_ssa_name_components.safe_grow_cleared (2 * num_ssa_names);
+  complex_ssa_name_components.safe_grow_cleared (2 * num_ssa_names, true);
 
   update_parameter_components ();
 

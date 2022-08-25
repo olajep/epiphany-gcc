@@ -1,5 +1,5 @@
 /* Statement translation -- generate GCC trees from gfc_code.
-   Copyright (C) 2002-2020 Free Software Foundation, Inc.
+   Copyright (C) 2002-2021 Free Software Foundation, Inc.
    Contributed by Paul Brook <paul@nowt.org>
    and Steven Bosscher <s.bosscher@student.tudelft.nl>
 
@@ -198,6 +198,13 @@ replace_ss (gfc_se *se, gfc_ss *old_ss, gfc_ss *new_ss)
   *sess = new_ss;
   new_ss->next = old_ss->next;
 
+  /* Make sure that trailing references are not lost.  */
+  if (old_ss->info
+      && old_ss->info->data.array.ref
+      && old_ss->info->data.array.ref->next
+      && !(new_ss->info->data.array.ref
+	   && new_ss->info->data.array.ref->next))
+    new_ss->info->data.array.ref = old_ss->info->data.array.ref;
 
   for (loopss = &(se->loop->ss); *loopss != gfc_ss_terminator;
        loopss = &((*loopss)->loop_chain))
@@ -349,6 +356,25 @@ gfc_conv_elemental_dependencies (gfc_se * se, gfc_se * loopse,
 }
 
 
+/* Given an executable statement referring to an intrinsic function call,
+   returns the intrinsic symbol.  */
+
+static gfc_intrinsic_sym *
+get_intrinsic_for_code (gfc_code *code)
+{
+  if (code->op == EXEC_CALL)
+    {
+      gfc_intrinsic_sym * const isym = code->resolved_isym;
+      if (isym)
+	return isym;
+      else
+	return gfc_get_intrinsic_for_expr (code->expr1);
+    }
+
+  return NULL;
+}
+
+
 /* Get the interface symbol for the procedure corresponding to the given call.
    We can't get the procedure symbol directly as we have to handle the case
    of (deferred) type-bound procedures.  */
@@ -383,6 +409,7 @@ gfc_trans_call (gfc_code * code, bool dependency_check,
   tree index = NULL_TREE;
   tree maskexpr = NULL_TREE;
   tree tmp;
+  bool is_intrinsic_mvbits;
 
   /* A CALL starts a new block because the actual arguments may have to
      be evaluated first.  */
@@ -394,20 +421,33 @@ gfc_trans_call (gfc_code * code, bool dependency_check,
   ss = gfc_ss_terminator;
   if (code->resolved_sym->attr.elemental)
     ss = gfc_walk_elemental_function_args (ss, code->ext.actual,
+					   get_intrinsic_for_code (code),
 					   get_proc_ifc_for_call (code),
 					   GFC_SS_REFERENCE);
+
+  /* MVBITS is inlined but needs the dependency checking found here.  */
+  is_intrinsic_mvbits = code->resolved_isym
+			&& code->resolved_isym->id == GFC_ISYM_MVBITS;
 
   /* Is not an elemental subroutine call with array valued arguments.  */
   if (ss == gfc_ss_terminator)
     {
 
-      /* Translate the call.  */
-      has_alternate_specifier
-	= gfc_conv_procedure_call (&se, code->resolved_sym, code->ext.actual,
-				  code->expr1, NULL);
+      if (is_intrinsic_mvbits)
+	{
+	  has_alternate_specifier = 0;
+	  gfc_conv_intrinsic_mvbits (&se, code->ext.actual, NULL);
+	}
+      else
+	{
+	  /* Translate the call.  */
+	  has_alternate_specifier =
+	    gfc_conv_procedure_call (&se, code->resolved_sym,
+				     code->ext.actual, code->expr1, NULL);
 
-      /* A subroutine without side-effect, by definition, does nothing!  */
-      TREE_SIDE_EFFECTS (se.expr) = 1;
+	  /* A subroutine without side-effect, by definition, does nothing!  */
+	  TREE_SIDE_EFFECTS (se.expr) = 1;
+	}
 
       /* Chain the pieces together and return the block.  */
       if (has_alternate_specifier)
@@ -490,10 +530,18 @@ gfc_trans_call (gfc_code * code, bool dependency_check,
 					TREE_TYPE (maskexpr), maskexpr);
 	}
 
-      /* Add the subroutine call to the block.  */
-      gfc_conv_procedure_call (&loopse, code->resolved_sym,
-			       code->ext.actual, code->expr1,
-			       NULL);
+      if (is_intrinsic_mvbits)
+	{
+	  has_alternate_specifier = 0;
+	  gfc_conv_intrinsic_mvbits (&loopse, code->ext.actual, &loop);
+	}
+      else
+	{
+	  /* Add the subroutine call to the block.  */
+	  gfc_conv_procedure_call (&loopse, code->resolved_sym,
+				   code->ext.actual, code->expr1,
+				   NULL);
+	}
 
       if (mask && count1)
 	{
@@ -689,8 +737,7 @@ gfc_trans_fail_image (gfc_code *code ATTRIBUTE_UNUSED)
 {
   if (flag_coarray == GFC_FCOARRAY_LIB)
     return build_call_expr_loc (input_location,
-				gfor_fndecl_caf_fail_image, 1,
-				build_int_cst (pchar_type_node, 0));
+				gfor_fndecl_caf_fail_image, 0);
   else
     {
       const char *name = gfc_get_string (PREFIX ("exit_i%d"), 4);
@@ -1199,7 +1246,8 @@ gfc_trans_sync (gfc_code *code, gfc_exec_op type)
 
   if (code->expr2)
     {
-      gcc_assert (code->expr2->expr_type == EXPR_VARIABLE);
+      gcc_assert (code->expr2->expr_type == EXPR_VARIABLE
+		  || code->expr2->expr_type == EXPR_FUNCTION);
       gfc_init_se (&argse, NULL);
       gfc_conv_expr_val (&argse, code->expr2);
       stat = argse.expr;
@@ -1209,7 +1257,8 @@ gfc_trans_sync (gfc_code *code, gfc_exec_op type)
 
   if (code->expr3 && flag_coarray == GFC_FCOARRAY_LIB)
     {
-      gcc_assert (code->expr3->expr_type == EXPR_VARIABLE);
+      gcc_assert (code->expr3->expr_type == EXPR_VARIABLE
+		  || code->expr3->expr_type == EXPR_FUNCTION);
       gfc_init_se (&argse, NULL);
       argse.want_pointer = 1;
       gfc_conv_expr (&argse, code->expr3);
@@ -1757,7 +1806,7 @@ trans_associate_var (gfc_symbol *sym, gfc_wrapped_block *block)
       if (e->ts.type == BT_CLASS)
 	{
 	  /* Go straight to the class data.  */
-	  if (sym2->attr.dummy)
+	  if (sym2->attr.dummy && !sym2->attr.optional)
 	    {
 	      class_decl = DECL_LANG_SPECIFIC (sym2->backend_decl) ?
 			   GFC_DECL_SAVED_DESCRIPTOR (sym2->backend_decl) :
@@ -1890,7 +1939,7 @@ trans_associate_var (gfc_symbol *sym, gfc_wrapped_block *block)
       gfc_conv_expr_descriptor (&se, e);
 
       if (sym->ts.type == BT_CHARACTER
-	  && !se.direct_byref && sym->ts.deferred
+	  && sym->ts.deferred
 	  && !sym->attr.select_type_temporary
 	  && VAR_P (sym->ts.u.cl->backend_decl)
 	  && se.string_length != sym->ts.u.cl->backend_decl)
@@ -2064,6 +2113,7 @@ trans_associate_var (gfc_symbol *sym, gfc_wrapped_block *block)
 	  /* Obtain a temporary class container for the result.  */
 	  gfc_conv_derived_to_class (&se, e, sym->ts, tmp, false, false);
 	  se.expr = build_fold_indirect_ref_loc (input_location, se.expr);
+	  need_len_assign = false;
 	}
       else
 	{
@@ -3921,9 +3971,10 @@ check_forall_dependencies (gfc_code *c, stmtblock_t *pre, stmtblock_t *post)
      point to the copy instead.  Note that the shallow copy of
      the variable will not suffice for derived types with
      pointer components.  We therefore leave these to their
-     own devices.  */
+     own devices.  Likewise for allocatable components.  */
   if (lsym->ts.type == BT_DERIVED
-	&& lsym->ts.u.derived->attr.pointer_comp)
+      && (lsym->ts.u.derived->attr.pointer_comp
+	  || lsym->ts.u.derived->attr.alloc_comp))
     return need_temp;
 
   new_symtree = NULL;
@@ -6972,7 +7023,7 @@ gfc_trans_allocate (gfc_code * code)
 	  gfc_expr *init_expr = gfc_expr_to_initialize (expr);
 	  gfc_expr *rhs = e3rhs ? e3rhs : gfc_copy_expr (code->expr3);
 	  flag_realloc_lhs = 0;
-	  tmp = gfc_trans_assignment (init_expr, rhs, false, false, true,
+	  tmp = gfc_trans_assignment (init_expr, rhs, true, false, true,
 				      false);
 	  flag_realloc_lhs = realloc_lhs;
 	  /* Free the expression allocated for init_expr.  */

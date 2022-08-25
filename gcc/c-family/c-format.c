@@ -1,5 +1,5 @@
 /* Check calls to formatted I/O functions (-Wformat).
-   Copyright (C) 1992-2020 Free Software Foundation, Inc.
+   Copyright (C) 1992-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -2997,6 +2997,7 @@ static const struct
    NAME ("decl", "declaration"),
    NAME ("enumeral", "enumerated"),
    NAME ("floating point", "floating-point"),
+   NAME ("nonstatic", "non-static"),
    NAME ("non-zero", "nonzero"),
    NAME ("reg", "register"),
    NAME ("stmt", "statement"),
@@ -3201,7 +3202,7 @@ check_tokens (const token_t *tokens, unsigned ntoks,
 			   wlen, format_chars);
   else
     {
-      /* Diagnose some common missspellings.  */
+      /* Diagnose some common misspellings.  */
       for (unsigned i = 0; i != sizeof badwords / sizeof *badwords; ++i)
 	{
 	  unsigned badwlen = strspn (badwords[i].name, " -");
@@ -3221,6 +3222,13 @@ check_tokens (const token_t *tokens, unsigned ntoks,
 		  ++badwlen;
 		  plural = "s";
 		}
+
+	      /* As an exception, don't warn about "decl-specifier*" since
+		 it's a C++ grammar production.  */
+	      if (badwords[i].name[0] == 'd'
+		  && strncmp (format_chars, "decl-specifier",
+			      strlen ("decl-specifier")) == 0)
+		continue;
 
 	      format_warning_substr (format_string_loc, format_string_cst,
 				     fmtchrpos, fmtchrpos + badwords[i].len,

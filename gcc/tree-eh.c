@@ -1,5 +1,5 @@
 /* Exception handling semantics and decomposition for trees.
-   Copyright (C) 2003-2020 Free Software Foundation, Inc.
+   Copyright (C) 2003-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -905,12 +905,7 @@ lower_try_finally_dup_block (gimple_seq seq, struct leh_state *outer_state,
   for (gsi = gsi_start (new_seq); !gsi_end_p (gsi); gsi_next (&gsi))
     {
       gimple *stmt = gsi_stmt (gsi);
-      /* We duplicate __builtin_stack_restore at -O0 in the hope of eliminating
-	 it on the EH paths.  When it is not eliminated, make it transparent in
-	 the debug info.  */
-      if (gimple_call_builtin_p (stmt, BUILT_IN_STACK_RESTORE))
-	gimple_set_location (stmt, UNKNOWN_LOCATION);
-      else if (LOCATION_LOCUS (gimple_location (stmt)) == UNKNOWN_LOCATION)
+      if (LOCATION_LOCUS (gimple_location (stmt)) == UNKNOWN_LOCATION)
 	{
 	  tree block = gimple_block (stmt);
 	  gimple_set_location (stmt, loc);
@@ -2072,9 +2067,6 @@ lower_eh_constructs_2 (struct leh_state *state, gimple_stmt_iterator *gsi)
 	  gimple_set_location (s, gimple_location (stmt));
 	  gimple_set_block (s, gimple_block (stmt));
 	  gimple_set_lhs (stmt, tmp);
-	  if (TREE_CODE (TREE_TYPE (tmp)) == COMPLEX_TYPE
-	      || TREE_CODE (TREE_TYPE (tmp)) == VECTOR_TYPE)
-	    DECL_GIMPLE_REG_P (tmp) = 1;
 	  gsi_insert_after (gsi, s, GSI_SAME_STMT);
 	}
       /* Look for things that can throw exceptions, and record them.  */
@@ -2462,13 +2454,35 @@ operation_could_trap_helper_p (enum tree_code op,
     case FLOOR_MOD_EXPR:
     case ROUND_MOD_EXPR:
     case TRUNC_MOD_EXPR:
-    case RDIV_EXPR:
-      if (honor_snans)
-	return true;
-      if (fp_operation)
-	return flag_trapping_math;
       if (!TREE_CONSTANT (divisor) || integer_zerop (divisor))
         return true;
+      if (TREE_CODE (divisor) == VECTOR_CST)
+	{
+	  /* Inspired by initializer_each_zero_or_onep.  */
+	  unsigned HOST_WIDE_INT nelts = vector_cst_encoded_nelts (divisor);
+	  if (VECTOR_CST_STEPPED_P (divisor)
+	      && !TYPE_VECTOR_SUBPARTS (TREE_TYPE (divisor))
+		    .is_constant (&nelts))
+	    return true;
+	  for (unsigned int i = 0; i < nelts; ++i)
+	    {
+	      tree elt = vector_cst_elt (divisor, i);
+	      if (integer_zerop (elt))
+		return true;
+	    }
+	}
+      return false;
+
+    case RDIV_EXPR:
+      if (fp_operation)
+	{
+	  if (honor_snans)
+	    return true;
+	  return flag_trapping_math;
+	}
+      /* Fixed point operations also use RDIV_EXPR.  */
+      if (!TREE_CONSTANT (divisor) || fixed_zerop (divisor))
+	return true;
       return false;
 
     case LT_EXPR:
@@ -2731,8 +2745,11 @@ tree_could_trap_p (tree expr)
       return TREE_THIS_VOLATILE (expr);
 
     case CALL_EXPR:
+      /* Internal function calls do not trap.  */
+      if (CALL_EXPR_FN (expr) == NULL_TREE)
+	return false;
       t = get_callee_fndecl (expr);
-      /* Assume that calls to weak functions may trap.  */
+      /* Assume that indirect and calls to weak functions may trap.  */
       if (!t || !DECL_P (t))
 	return true;
       if (DECL_WEAK (t))
@@ -4754,15 +4771,20 @@ cleanup_all_empty_eh (void)
   eh_landing_pad lp;
   int i;
 
-  /* Ideally we'd walk the region tree and process LPs inner to outer
-     to avoid quadraticness in EH redirection.  Walking the LP array
-     in reverse seems to be an approximation of that.  */
+  /* The post-order traversal may lead to quadraticness in the redirection
+     of incoming EH edges from inner LPs, so first try to walk the region
+     tree from inner to outer LPs in order to eliminate these edges.  */
   for (i = vec_safe_length (cfun->eh->lp_array) - 1; i >= 1; --i)
     {
       lp = (*cfun->eh->lp_array)[i];
       if (lp)
 	changed |= cleanup_empty_eh (lp);
     }
+
+  /* Now do the post-order traversal to eliminate outer empty LPs.  */
+  for (i = 1; vec_safe_iterate (cfun->eh->lp_array, i, &lp); ++i)
+    if (lp)
+      changed |= cleanup_empty_eh (lp);
 
   return changed;
 }

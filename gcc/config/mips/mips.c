@@ -1,5 +1,5 @@
 /* Subroutines used for MIPS code generation.
-   Copyright (C) 1989-2020 Free Software Foundation, Inc.
+   Copyright (C) 1989-2021 Free Software Foundation, Inc.
    Contributed by A. Lichnewsky, lich@inria.inria.fr.
    Changes by Michael Meissner, meissner@osf.org.
    64-bit r4000 support by Ian Lance Taylor, ian@cygnus.com, and
@@ -2381,7 +2381,7 @@ mips_symbol_insns (enum mips_symbol_type type, machine_mode mode)
 {
   /* MSA LD.* and ST.* cannot support loading symbols via an immediate
      operand.  */
-  if (MSA_SUPPORTED_MODE_P (mode))
+  if (mode != MAX_MACHINE_MODE && MSA_SUPPORTED_MODE_P (mode))
     return 0;
 
   return mips_symbol_insns_1 (type, mode) * (TARGET_MIPS16 ? 2 : 1);
@@ -8400,7 +8400,7 @@ mips_expand_ext_as_unaligned_load (rtx dest, rtx src, HOST_WIDE_INT width,
   /* If TARGET_64BIT, the destination of a 32-bit "extz" or "extzv" will
      be a DImode, create a new temp and emit a zero extend at the end.  */
   if (GET_MODE (dest) == DImode
-      && REG_P (dest)
+      && (REG_P (dest) || (SUBREG_P (dest) && !MEM_P (SUBREG_REG (dest))))
       && GET_MODE_BITSIZE (SImode) == width)
     {
       dest1 = dest;
@@ -9315,10 +9315,10 @@ mips_select_rtx_section (machine_mode mode, rtx x,
    default_function_rodata_section.  */
 
 static section *
-mips_function_rodata_section (tree decl)
+mips_function_rodata_section (tree decl, bool)
 {
   if (!TARGET_ABICALLS || TARGET_ABSOLUTE_ABICALLS || TARGET_GPWORD)
-    return default_function_rodata_section (decl);
+    return default_function_rodata_section (decl, false);
 
   if (decl && DECL_SECTION_NAME (decl))
     {
@@ -21624,6 +21624,15 @@ mips_vectorize_vec_perm_const (machine_mode vmode, rtx target, rtx op0,
   bool ok;
 
   d.target = target;
+  if (op0)
+    {
+      rtx nop0 = force_reg (vmode, op0);
+      if (op0 == op1)
+        op1 = nop0;
+      op0 = nop0;
+    }
+  if (op1)
+    op1 = force_reg (vmode, op1);
   d.op0 = op0;
   d.op1 = op1;
 
@@ -22311,6 +22320,17 @@ mips_expand_msa_cmp (rtx dest, enum rtx_code cond, rtx op0, rtx op1)
     }
 }
 
+void
+mips_expand_vec_cmp_expr (rtx *operands)
+{
+  rtx cond = operands[1];
+  rtx op0 = operands[2];
+  rtx op1 = operands[3];
+  rtx res = operands[0];
+
+  mips_expand_msa_cmp (res, GET_CODE (cond), op0, op1);
+}
+
 /* Expand VEC_COND_EXPR, where:
    MODE is mode of the result
    VIMODE equivalent integer mode
@@ -22418,12 +22438,12 @@ mips_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
   tree get_fcsr = mips_builtin_decls[MIPS_GET_FCSR];
   tree set_fcsr = mips_builtin_decls[MIPS_SET_FCSR];
   tree get_fcsr_hold_call = build_call_expr (get_fcsr, 0);
-  tree hold_assign_orig = build2 (MODIFY_EXPR, MIPS_ATYPE_USI,
-				  fcsr_orig_var, get_fcsr_hold_call);
+  tree hold_assign_orig = build4 (TARGET_EXPR, MIPS_ATYPE_USI,
+				  fcsr_orig_var, get_fcsr_hold_call, NULL, NULL);
   tree hold_mod_val = build2 (BIT_AND_EXPR, MIPS_ATYPE_USI, fcsr_orig_var,
 			      build_int_cst (MIPS_ATYPE_USI, 0xfffff003));
-  tree hold_assign_mod = build2 (MODIFY_EXPR, MIPS_ATYPE_USI,
-				 fcsr_mod_var, hold_mod_val);
+  tree hold_assign_mod = build4 (TARGET_EXPR, MIPS_ATYPE_USI,
+				 fcsr_mod_var, hold_mod_val, NULL, NULL);
   tree set_fcsr_hold_call = build_call_expr (set_fcsr, 1, fcsr_mod_var);
   tree hold_all = build2 (COMPOUND_EXPR, MIPS_ATYPE_USI,
 			  hold_assign_orig, hold_assign_mod);
@@ -22433,8 +22453,8 @@ mips_atomic_assign_expand_fenv (tree *hold, tree *clear, tree *update)
   *clear = build_call_expr (set_fcsr, 1, fcsr_mod_var);
 
   tree get_fcsr_update_call = build_call_expr (get_fcsr, 0);
-  *update = build2 (MODIFY_EXPR, MIPS_ATYPE_USI,
-		    exceptions_var, get_fcsr_update_call);
+  *update = build4 (TARGET_EXPR, MIPS_ATYPE_USI,
+		    exceptions_var, get_fcsr_update_call, NULL, NULL);
   tree set_fcsr_update_call = build_call_expr (set_fcsr, 1, fcsr_orig_var);
   *update = build2 (COMPOUND_EXPR, void_type_node, *update,
 		    set_fcsr_update_call);

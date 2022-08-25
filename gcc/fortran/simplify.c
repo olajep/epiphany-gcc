@@ -1,5 +1,5 @@
 /* Simplify intrinsic functions at compile-time.
-   Copyright (C) 2000-2020 Free Software Foundation, Inc.
+   Copyright (C) 2000-2021 Free Software Foundation, Inc.
    Contributed by Andy Vaught & Katherine Holcomb
 
 This file is part of GCC.
@@ -220,6 +220,8 @@ static bool
 is_constant_array_expr (gfc_expr *e)
 {
   gfc_constructor *c;
+  bool array_OK = true;
+  mpz_t size;
 
   if (e == NULL)
     return true;
@@ -235,9 +237,39 @@ is_constant_array_expr (gfc_expr *e)
        c; c = gfc_constructor_next (c))
     if (c->expr->expr_type != EXPR_CONSTANT
 	  && c->expr->expr_type != EXPR_STRUCTURE)
+      {
+	array_OK = false;
+	break;
+      }
+
+  /* Check and expand the constructor.  */
+  if (!array_OK && gfc_init_expr_flag && e->rank == 1)
+    {
+      array_OK = gfc_reduce_init_expr (e);
+      /* gfc_reduce_init_expr resets the flag.  */
+      gfc_init_expr_flag = true;
+    }
+  else
+    return array_OK;
+
+  /* Recheck to make sure that any EXPR_ARRAYs have gone.  */
+  for (c = gfc_constructor_first (e->value.constructor);
+       c; c = gfc_constructor_next (c))
+    if (c->expr->expr_type != EXPR_CONSTANT
+	  && c->expr->expr_type != EXPR_STRUCTURE)
       return false;
 
-  return true;
+  /* Make sure that the array has a valid shape.  */
+  if (e->shape == NULL && e->rank == 1)
+    {
+      if (!gfc_array_size(e, &size))
+	return false;
+      e->shape = gfc_get_shape (1);
+      mpz_init_set (e->shape[0], size);
+      mpz_clear (size);
+    }
+
+  return array_OK;
 }
 
 /* Test for a size zero array.  */
@@ -2077,6 +2109,9 @@ gfc_simplify_cshift (gfc_expr *array, gfc_expr *shift, gfc_expr *dim)
   else
     which = 0;
 
+  if (array->shape == NULL)
+    return NULL;
+
   gfc_array_size (array, &size);
   arraysize = mpz_get_ui (size);
   mpz_clear (size);
@@ -2535,6 +2570,9 @@ gfc_simplify_eoshift (gfc_expr *array, gfc_expr *shift, gfc_expr *boundary,
   result->ts = array->ts;
 
   if (arraysize == 0)
+    goto final;
+
+  if (array->shape == NULL)
     goto final;
 
   arrayvec = XCNEWVEC (gfc_expr *, arraysize);
@@ -4080,7 +4118,7 @@ simplify_bound_dim (gfc_expr *array, gfc_expr *kind, int d, int upper,
       || (coarray && d == as->rank + as->corank
 	  && (!upper || flag_coarray == GFC_FCOARRAY_SINGLE)))
     {
-      if (as->lower[d-1]->expr_type == EXPR_CONSTANT)
+      if (as->lower[d-1] && as->lower[d-1]->expr_type == EXPR_CONSTANT)
 	{
 	  gfc_free_expr (result);
 	  return gfc_copy_expr (as->lower[d-1]);
@@ -4136,7 +4174,17 @@ simplify_bound_dim (gfc_expr *array, gfc_expr *kind, int d, int upper,
     {
       if (upper)
 	{
-	  if (!gfc_ref_dimen_size (&ref->u.ar, d - 1, &result->value.integer, NULL))
+	  int d2 = 0, cnt = 0;
+	  for (int idx = 0; idx < ref->u.ar.dimen; ++idx)
+	    {
+	      if (ref->u.ar.dimen_type[idx] == DIMEN_ELEMENT)
+		d2++;
+	      else if (cnt < d - 1)
+		cnt++;
+	      else
+		break;
+	    }
+	  if (!gfc_ref_dimen_size (&ref->u.ar, d2 + d - 1, &result->value.integer, NULL))
 	    goto returnNull;
 	}
       else
@@ -4219,6 +4267,12 @@ simplify_bound (gfc_expr *array, gfc_expr *dim, gfc_expr *kind, int upper)
 
   if (as && (as->type == AS_DEFERRED || as->type == AS_ASSUMED_RANK
 	     || (as->type == AS_ASSUMED_SHAPE && upper)))
+    return NULL;
+
+  /* 'array' shall not be an unallocated allocatable variable or a pointer that
+     is not associated.  */
+  if (array->expr_type == EXPR_VARIABLE
+      && (gfc_expr_attr (array).allocatable || gfc_expr_attr (array).pointer))
     return NULL;
 
   gcc_assert (!as
@@ -4470,6 +4524,49 @@ gfc_simplify_leadz (gfc_expr *e)
 }
 
 
+/* Check for constant length of a substring.  */
+
+static bool
+substring_has_constant_len (gfc_expr *e)
+{
+  gfc_ref *ref;
+  HOST_WIDE_INT istart, iend, length;
+  bool equal_length = false;
+
+  if (e->ts.type != BT_CHARACTER)
+    return false;
+
+  for (ref = e->ref; ref; ref = ref->next)
+    if (ref->type != REF_COMPONENT && ref->type != REF_ARRAY)
+      break;
+
+  if (!ref
+      || ref->type != REF_SUBSTRING
+      || !ref->u.ss.start
+      || ref->u.ss.start->expr_type != EXPR_CONSTANT
+      || !ref->u.ss.end
+      || ref->u.ss.end->expr_type != EXPR_CONSTANT)
+    return false;
+
+  /* Basic checks on substring starting and ending indices.  */
+  if (!gfc_resolve_substring (ref, &equal_length))
+    return false;
+
+  istart = gfc_mpz_get_hwi (ref->u.ss.start->value.integer);
+  iend = gfc_mpz_get_hwi (ref->u.ss.end->value.integer);
+
+  if (istart <= iend)
+    length = iend - istart + 1;
+  else
+    length = 0;
+
+  /* Fix substring length.  */
+  e->value.character.length = length;
+
+  return true;
+}
+
+
 gfc_expr *
 gfc_simplify_len (gfc_expr *e, gfc_expr *kind)
 {
@@ -4479,7 +4576,8 @@ gfc_simplify_len (gfc_expr *e, gfc_expr *kind)
   if (k == -1)
     return &gfc_bad_expr;
 
-  if (e->expr_type == EXPR_CONSTANT)
+  if (e->expr_type == EXPR_CONSTANT
+      || substring_has_constant_len (e))
     {
       result = gfc_get_constant_expr (BT_INTEGER, k, &e->where);
       mpz_set_si (result->value.integer, e->value.character.length);
@@ -4783,6 +4881,9 @@ gfc_simplify_maskr (gfc_expr *i, gfc_expr *kind_arg)
   bool fail = gfc_extract_int (i, &arg);
   gcc_assert (!fail);
 
+  if (!gfc_check_mask (i, kind_arg))
+    return &gfc_bad_expr;
+
   result = gfc_get_constant_expr (BT_INTEGER, kind, &i->where);
 
   /* MASKR(n) = 2^n - 1 */
@@ -4813,6 +4914,9 @@ gfc_simplify_maskl (gfc_expr *i, gfc_expr *kind_arg)
 
   bool fail = gfc_extract_int (i, &arg);
   gcc_assert (!fail);
+
+  if (!gfc_check_mask (i, kind_arg))
+    return &gfc_bad_expr;
 
   result = gfc_get_constant_expr (BT_INTEGER, kind, &i->where);
 
@@ -4924,6 +5028,8 @@ min_max_choose (gfc_expr *arg, gfc_expr *extremum, int sign, bool back_val)
   switch (arg->ts.type)
     {
       case BT_INTEGER:
+	if (extremum->ts.kind < arg->ts.kind)
+	  extremum->ts.kind = arg->ts.kind;
 	ret = mpz_cmp (arg->value.integer,
 		       extremum->value.integer) * sign;
 	if (ret > 0)
@@ -4931,6 +5037,8 @@ min_max_choose (gfc_expr *arg, gfc_expr *extremum, int sign, bool back_val)
 	break;
 
       case BT_REAL:
+	if (extremum->ts.kind < arg->ts.kind)
+	  extremum->ts.kind = arg->ts.kind;
 	if (mpfr_nan_p (extremum->value.real))
 	  {
 	    ret = 1;
@@ -5179,6 +5287,9 @@ simplify_minmaxloc_nodim (gfc_expr *result, gfc_expr *extremum,
   if (mask
       && mask->expr_type == EXPR_CONSTANT
       && !mask->value.logical)
+    goto finish;
+
+  if (array->shape == NULL)
     goto finish;
 
   for (i = 0; i < array->rank; i++)
@@ -6394,7 +6505,7 @@ gfc_simplify_is_contiguous (gfc_expr *array)
 
   if (gfc_is_not_contiguous (array))
     return gfc_get_logical_expr (gfc_default_logical_kind, &array->where, 0);
-    
+
   return NULL;
 }
 
@@ -6721,6 +6832,7 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
   unsigned long j;
   size_t nsource;
   gfc_expr *e, *result;
+  bool zerosize = false;
 
   /* Check that argument expression types are OK.  */
   if (!is_constant_array_expr (source)
@@ -6749,7 +6861,13 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
       gfc_extract_int (e, &shape[rank]);
 
       gcc_assert (rank >= 0 && rank < GFC_MAX_DIMENSIONS);
-      gcc_assert (shape[rank] >= 0);
+      if (shape[rank] < 0)
+	{
+	  gfc_error ("The SHAPE array for the RESHAPE intrinsic at %L has a "
+		     "negative value %d for dimension %d",
+		     &shape_exp->where, shape[rank], rank+1);
+	  return &gfc_bad_expr;
+	}
 
       rank++;
     }
@@ -6840,10 +6958,19 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 			       &source->where);
   if (source->ts.type == BT_DERIVED)
     result->ts.u.derived = source->ts.u.derived;
+  if (source->ts.type == BT_CHARACTER && result->ts.u.cl == NULL)
+    result->ts = source->ts;
   result->rank = rank;
   result->shape = gfc_get_shape (rank);
   for (i = 0; i < rank; i++)
-    mpz_init_set_ui (result->shape[i], shape[i]);
+    {
+      mpz_init_set_ui (result->shape[i], shape[i]);
+      if (shape[i] == 0)
+	zerosize = true;
+    }
+
+  if (zerosize)
+    goto sizezero;
 
   while (nsource > 0 || npad > 0)
     {
@@ -6892,6 +7019,8 @@ inc:
 
       break;
     }
+
+sizezero:
 
   mpz_clear (index);
 
@@ -7369,6 +7498,7 @@ simplify_size (gfc_expr *array, gfc_expr *dim, int k)
   mpz_t size;
   gfc_expr *return_value;
   int d;
+  gfc_ref *ref;
 
   /* For unary operations, the size of the result is given by the size
      of the operand.  For binary ones, it's the size of the first operand
@@ -7424,6 +7554,10 @@ simplify_size (gfc_expr *array, gfc_expr *dim, int k)
 	}
       return simplified;
     }
+
+  for (ref = array->ref; ref; ref = ref->next)
+    if (ref->type == REF_ARRAY && ref->u.ar.as)
+      gfc_resolve_array_spec (ref->u.ar.as, 0);
 
   if (dim == NULL)
     {
@@ -8021,7 +8155,18 @@ gfc_simplify_transfer (gfc_expr *source, gfc_expr *mold, gfc_expr *size)
      set even for array expressions, in order to pass this information into
      gfc_target_interpret_expr.  */
   if (result->ts.type == BT_CHARACTER && gfc_is_constant_expr (mold_element))
-    result->value.character.length = mold_element->value.character.length;
+    {
+      result->value.character.length = mold_element->value.character.length;
+
+      /* Let the typespec of the result inherit the string length.
+	 This is crucial if a resulting array has size zero.  */
+      if (mold_element->ts.u.cl->length)
+	result->ts.u.cl->length = gfc_copy_expr (mold_element->ts.u.cl->length);
+      else
+	result->ts.u.cl->length =
+	  gfc_get_int_expr (gfc_charlen_int_kind, NULL,
+			    mold_element->value.character.length);
+    }
 
   /* Set the number of elements in the result, and determine its size.  */
 
@@ -8061,12 +8206,15 @@ gfc_simplify_transpose (gfc_expr *matrix)
 
   gcc_assert (matrix->rank == 2);
 
+  if (matrix->shape == NULL)
+    return NULL;
+
   result = gfc_get_array_expr (matrix->ts.type, matrix->ts.kind,
 			       &matrix->where);
   result->rank = 2;
   result->shape = gfc_get_shape (result->rank);
-  mpz_set (result->shape[0], matrix->shape[1]);
-  mpz_set (result->shape[1], matrix->shape[0]);
+  mpz_init_set (result->shape[0], matrix->shape[1]);
+  mpz_init_set (result->shape[1], matrix->shape[0]);
 
   if (matrix->ts.type == BT_CHARACTER)
     result->ts.u.cl = matrix->ts.u.cl;

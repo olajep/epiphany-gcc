@@ -1,6 +1,6 @@
 // Class filesystem::path -*- C++ -*-
 
-// Copyright (C) 2014-2020 Free Software Foundation, Inc.
+// Copyright (C) 2014-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -71,13 +71,13 @@ _GLIBCXX_BEGIN_NAMESPACE_CXX11
   using std::basic_string_view;
 #endif
 
+  /// @cond undocumented
+namespace __detail
+{
   /** @addtogroup filesystem-ts
    *  @{
    */
 
-  /// @cond undocumented
-namespace __detail
-{
   template<typename _CharT,
 	   typename _Ch = typename remove_const<_CharT>::type>
     using __is_encoded_char
@@ -124,7 +124,7 @@ namespace __detail
 
   template<typename _Source>
     struct __constructible_from<_Source, void>
-    : decltype(__is_path_src(std::declval<_Source>(), 0))
+    : decltype(__is_path_src(std::declval<const _Source&>(), 0))
     { };
 
   template<typename _Tp1, typename _Tp2 = void,
@@ -188,10 +188,16 @@ namespace __detail
 #endif
       >::value, _UnqualVal>::type;
 
+  /// @} group filesystem-ts
 } // namespace __detail
   /// @endcond
 
+  /** @addtogroup filesystem-ts
+   *  @{
+   */
+
   /// A filesystem path.
+  /// @ingroup filesystem-ts
   class path
   {
   public:
@@ -419,8 +425,8 @@ namespace __detail
     class iterator;
     typedef iterator const_iterator;
 
-    iterator begin() const;
-    iterator end() const;
+    iterator begin() const noexcept;
+    iterator end() const noexcept;
 
     /// @cond undocumented
     // Create a basic_string by reading until a null character.
@@ -495,6 +501,13 @@ namespace __detail
     _S_convert_loc(const char* __first, const char* __last,
 		   const std::locale& __loc);
 
+    static string_type
+    _S_convert_loc(char* __first, char* __last, const std::locale& __loc)
+    {
+      return _S_convert_loc(const_cast<const char*>(__first),
+			    const_cast<const char*>(__last), __loc);
+    }
+
     template<typename _Iter>
       static string_type
       _S_convert_loc(_Iter __first, _Iter __last, const std::locale& __loc)
@@ -544,8 +557,7 @@ namespace __detail
   size_t hash_value(const path& __p) noexcept;
 
   /// Compare paths
-  inline bool operator<(const path& __lhs, const path& __rhs) noexcept
-  { return __lhs.compare(__rhs) < 0; }
+  inline bool operator<(const path& __lhs, const path& __rhs) noexcept;
 
   /// Compare paths
   inline bool operator<=(const path& __lhs, const path& __rhs) noexcept
@@ -560,8 +572,7 @@ namespace __detail
   { return !(__lhs < __rhs); }
 
   /// Compare paths
-  inline bool operator==(const path& __lhs, const path& __rhs) noexcept
-  { return __lhs.compare(__rhs) == 0; }
+  inline bool operator==(const path& __lhs, const path& __rhs) noexcept;
 
   /// Compare paths
   inline bool operator!=(const path& __lhs, const path& __rhs) noexcept
@@ -1268,7 +1279,17 @@ namespace __detail
     return _M_at_end == __rhs._M_at_end;
   }
 
-  // @} group filesystem-ts
+  // Define these now that path and path::iterator are complete.
+  // They needs to consider the string_view(Range&&) constructor during
+  // overload resolution, which depends on whether range<path> is satisfied,
+  // which depends on whether path::iterator is complete.
+  inline bool operator<(const path& __lhs, const path& __rhs) noexcept
+  { return __lhs.compare(__rhs) < 0; }
+
+  inline bool operator==(const path& __lhs, const path& __rhs) noexcept
+  { return __lhs.compare(__rhs) == 0; }
+
+  /// @} group filesystem-ts
 _GLIBCXX_END_NAMESPACE_CXX11
 } // namespace v1
 } // namespace filesystem

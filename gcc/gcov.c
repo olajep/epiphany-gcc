@@ -1,6 +1,6 @@
 /* Gcov.c: prepend line execution counts and branch probabilities to a
    source file.
-   Copyright (C) 1990-2020 Free Software Foundation, Inc.
+   Copyright (C) 1990-2021 Free Software Foundation, Inc.
    Contributed by James E. Wilson of Cygnus Support.
    Mangled by Bob Manson of Cygnus Support.
    Mangled further by Nathan Sidwell <nathan@codesourcery.com>
@@ -293,7 +293,7 @@ public:
   /* Index of source file where the function is defined.  */
   unsigned src;
 
-  /* Vector of line information.  */
+  /* Vector of line information (used only for group functions).  */
   vector<line_info> lines;
 
   /* Next function.  */
@@ -371,6 +371,9 @@ public:
   /* Register a new function.  */
   void add_function (function_info *fn);
 
+  /* Debug the source file.  */
+  void debug ();
+
   /* Index of the source_info in sources vector.  */
   unsigned index;
 
@@ -426,6 +429,31 @@ source_info::get_functions_at_location (unsigned line_num) const
     std::sort (slot->begin (), slot->end (), function_line_start_cmp ());
 
   return slot;
+}
+
+void source_info::debug ()
+{
+  fprintf (stderr, "source_info: %s\n", name);
+  for (vector<function_info *>::iterator it = functions.begin ();
+       it != functions.end (); it++)
+    {
+      function_info *fn = *it;
+      fprintf (stderr, "  function_info: %s\n", fn->get_name ());
+      for (vector<block_info>::iterator bit = fn->blocks.begin ();
+	   bit != fn->blocks.end (); bit++)
+	{
+	  fprintf (stderr, "    block_info id=%d, count=%" PRId64 " \n",
+		   bit->id, bit->count);
+	}
+    }
+
+  for (unsigned lineno = 1; lineno < lines.size (); ++lineno)
+    {
+      line_info &line = lines[lineno];
+      fprintf (stderr, "  line_info=%d, count=%" PRId64 "\n", lineno, line.count);
+    }
+
+  fprintf (stderr, "\n");
 }
 
 class name_map
@@ -579,6 +607,10 @@ static int flag_human_readable_numbers = 0;
 
 static int flag_function_summary = 0;
 
+/* Print debugging dumps.  */
+
+static int flag_debug = 0;
+
 /* Object directory file prefix.  This is the directory/file where the
    graph and data files are looked for, if nonzero.  */
 
@@ -630,8 +662,8 @@ static void accumulate_line_counts (source_info *);
 static void output_gcov_file (const char *, source_info *);
 static int output_branch_count (FILE *, int, const arc_info *);
 static void output_lines (FILE *, const source_info *);
-static char *make_gcov_file_name (const char *, const char *);
-static char *mangle_name (const char *, char *);
+static string make_gcov_file_name (const char *, const char *);
+static char *mangle_name (const char *);
 static void release_structures (void);
 extern int main (int, char **);
 
@@ -874,6 +906,9 @@ main (int argc, char **argv)
 	}
     }
 
+  if (!flag_use_stdout)
+    executed_summary (total_lines, total_executed);
+
   return 0;
 }
 
@@ -893,10 +928,12 @@ print_usage (int error_p)
   fnotice (file, "  -c, --branch-counts             Output counts of branches taken\n\
                                     rather than percentages\n");
   fnotice (file, "  -d, --display-progress          Display progress information\n");
+  fnotice (file, "  -D, --debug			    Display debugging dumps\n");
   fnotice (file, "  -f, --function-summaries        Output summaries for each function\n");
   fnotice (file, "  -h, --help                      Print this help, then exit\n");
-  fnotice (file, "  -i, --json-format               Output JSON intermediate format into .gcov.json.gz file\n");
-  fnotice (file, "  -j, --human-readable            Output human readable numbers\n");
+  fnotice (file, "  -j, --json-format               Output JSON intermediate format\n\
+                                    into .gcov.json.gz file\n");
+  fnotice (file, "  -H, --human-readable            Output human readable numbers\n");
   fnotice (file, "  -k, --use-colors                Emit colored output\n");
   fnotice (file, "  -l, --long-file-names           Use long output file names for included\n\
                                     source files\n");
@@ -912,6 +949,9 @@ print_usage (int error_p)
   fnotice (file, "  -v, --version                   Print version number, then exit\n");
   fnotice (file, "  -w, --verbose                   Print verbose informations\n");
   fnotice (file, "  -x, --hash-filenames            Hash long pathnames\n");
+  fnotice (file, "\nObsolete options:\n");
+  fnotice (file, "  -i, --json-format               Replaced with -j, --json-format\n");
+  fnotice (file, "  -j, --human-readable            Replaced with -H, --human-readable\n");
   fnotice (file, "\nFor bug reporting instructions, please see:\n%s.\n",
 	   bug_report_url);
   exit (status);
@@ -923,12 +963,11 @@ static void
 print_version (void)
 {
   fnotice (stdout, "gcov %s%s\n", pkgversion_string, version_string);
-  fprintf (stdout, "Copyright %s 2020 Free Software Foundation, Inc.\n",
+  fprintf (stdout, "Copyright %s 2021 Free Software Foundation, Inc.\n",
 	   _("(C)"));
   fnotice (stdout,
-	   _("This is free software; see the source for copying conditions.\n"
-	     "There is NO warranty; not even for MERCHANTABILITY or \n"
-	     "FITNESS FOR A PARTICULAR PURPOSE.\n\n"));
+	   _("This is free software; see the source for copying conditions.  There is NO\n\
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"));
   exit (SUCCESS_EXIT_CODE);
 }
 
@@ -940,8 +979,8 @@ static const struct option options[] =
   { "all-blocks",           no_argument,       NULL, 'a' },
   { "branch-probabilities", no_argument,       NULL, 'b' },
   { "branch-counts",        no_argument,       NULL, 'c' },
-  { "json-format",	    no_argument,       NULL, 'i' },
-  { "human-readable",	    no_argument,       NULL, 'j' },
+  { "json-format",	    no_argument,       NULL, 'j' },
+  { "human-readable",	    no_argument,       NULL, 'H' },
   { "no-output",            no_argument,       NULL, 'n' },
   { "long-file-names",      no_argument,       NULL, 'l' },
   { "function-summaries",   no_argument,       NULL, 'f' },
@@ -957,6 +996,7 @@ static const struct option options[] =
   { "hash-filenames",	    no_argument,       NULL, 'x' },
   { "use-colors",	    no_argument,       NULL, 'k' },
   { "use-hotness-colors",   no_argument,       NULL, 'q' },
+  { "debug",		    no_argument,       NULL, 'D' },
   { 0, 0, 0, 0 }
 };
 
@@ -967,7 +1007,7 @@ process_args (int argc, char **argv)
 {
   int opt;
 
-  const char *opts = "abcdfhijklmno:pqrs:tuvwx";
+  const char *opts = "abcdDfhHijklmno:pqrs:tuvwx";
   while ((opt = getopt_long (argc, argv, opts, options, NULL)) != -1)
     {
       switch (opt)
@@ -990,7 +1030,7 @@ process_args (int argc, char **argv)
 	case 'l':
 	  flag_long_names = 1;
 	  break;
-	case 'j':
+	case 'H':
 	  flag_human_readable_numbers = 1;
 	  break;
 	case 'k':
@@ -1022,6 +1062,7 @@ process_args (int argc, char **argv)
 	  flag_unconditional = 1;
 	  break;
 	case 'i':
+	case 'j':
 	  flag_json_format = 1;
 	  flag_gcov_file = 1;
 	  break;
@@ -1036,6 +1077,9 @@ process_args (int argc, char **argv)
 	  break;
 	case 't':
 	  flag_use_stdout = 1;
+	  break;
+	case 'D':
+	  flag_debug = 1;
 	  break;
 	case 'v':
 	  print_version ();
@@ -1090,6 +1134,41 @@ output_intermediate_json_line (json::array *object,
   object->append (lineo);
 }
 
+/* Strip filename extension in STR.  */
+
+static string
+strip_extention (string str)
+{
+  string::size_type pos = str.rfind ('.');
+  if (pos != string::npos)
+    str = str.substr (0, pos);
+
+  return str;
+}
+
+/* Calcualte md5sum for INPUT string and return it in hex string format.  */
+
+static string
+get_md5sum (const char *input)
+{
+  md5_ctx ctx;
+  char md5sum[16];
+  string str;
+
+  md5_init_ctx (&ctx);
+  md5_process_bytes (input, strlen (input), &ctx);
+  md5_finish_ctx (&ctx, md5sum);
+
+  for (unsigned i = 0; i < 16; i++)
+    {
+      char b[3];
+      sprintf (b, "%02x", (unsigned char)md5sum[i]);
+      str += b;
+    }
+
+  return str;
+}
+
 /* Get the name of the gcov file.  The return value must be free'd.
 
    It appends the '.gcov' extension to the *basename* of the file.
@@ -1099,20 +1178,26 @@ output_intermediate_json_line (json::array *object,
    input: foo.da,       output: foo.da.gcov
    input: a/b/foo.cc,   output: foo.cc.gcov  */
 
-static char *
-get_gcov_intermediate_filename (const char *file_name)
+static string
+get_gcov_intermediate_filename (const char *input_file_name)
 {
-  const char *gcov = ".gcov.json.gz";
-  char *result;
-  const char *cptr;
+  string base = basename (input_file_name);
+  string str = strip_extention (base);
 
-  /* Find the 'basename'.  */
-  cptr = lbasename (file_name);
+  if (flag_hash_filenames)
+    {
+      str += "##";
+      str += get_md5sum (input_file_name);
+    }
+  else if (flag_preserve_paths && base != input_file_name)
+    {
+      str += "##";
+      str += mangle_path (input_file_name);
+      str = strip_extention (str);
+    }
 
-  result = XNEWVEC (char, strlen (cptr) + strlen (gcov) + 1);
-  sprintf (result, "%s%s", cptr, gcov);
-
-  return result;
+  str += ".gcov.json.gz";
+  return str.c_str ();
 }
 
 /* Output the result in JSON intermediate format.
@@ -1158,21 +1243,22 @@ output_json_intermediate_file (json::array *json_files, source_info *src)
   json::array *lineso = new json::array ();
   root->set ("lines", lineso);
 
-  function_info *last_non_group_fn = NULL;
+  vector<function_info *> last_non_group_fns;
 
   for (unsigned line_num = 1; line_num <= src->lines.size (); line_num++)
     {
       vector<function_info *> *fns = src->get_functions_at_location (line_num);
 
       if (fns != NULL)
-	/* Print first group functions that begin on the line.  */
+	/* Print info for all group functions that begin on the line.  */
 	for (vector<function_info *>::iterator it2 = fns->begin ();
 	     it2 != fns->end (); it2++)
 	  {
 	    if (!(*it2)->is_group)
-	      last_non_group_fn = *it2;
+	      last_non_group_fns.push_back (*it2);
 
 	    vector<line_info> &lines = (*it2)->lines;
+	    /* The LINES array is allocated only for group functions.  */
 	    for (unsigned i = 0; i < lines.size (); i++)
 	      {
 		line_info *line = &lines[i];
@@ -1183,9 +1269,17 @@ output_json_intermediate_file (json::array *json_files, source_info *src)
 
       /* Follow with lines associated with the source file.  */
       if (line_num < src->lines.size ())
-	output_intermediate_json_line (lineso, &src->lines[line_num], line_num,
-				       (last_non_group_fn != NULL
-					? last_non_group_fn->m_name : NULL));
+	{
+	  unsigned size = last_non_group_fns.size ();
+	  function_info *last_fn = size > 0 ? last_non_group_fns[size - 1] : NULL;
+	  const char *fname = last_fn ? last_fn->m_name : NULL;
+	  output_intermediate_json_line (lineso, &src->lines[line_num], line_num,
+					 fname);
+
+	  /* Pop ending function from stack.  */
+	  if (last_fn != NULL && last_fn->end_line == line_num)
+	    last_non_group_fns.pop_back ();
+	}
     }
 }
 
@@ -1363,7 +1457,9 @@ process_all_functions (void)
 static void
 output_gcov_file (const char *file_name, source_info *src)
 {
-  char *gcov_file_name = make_gcov_file_name (file_name, src->coverage.name);
+  string gcov_file_name_str
+    = make_gcov_file_name (file_name, src->coverage.name);
+  const char *gcov_file_name = gcov_file_name_str.c_str ();
 
   if (src->coverage.lines)
     {
@@ -1385,13 +1481,12 @@ output_gcov_file (const char *file_name, source_info *src)
       unlink (gcov_file_name);
       fnotice (stdout, "Removing '%s'\n", gcov_file_name);
     }
-  free (gcov_file_name);
 }
 
 static void
 generate_results (const char *file_name)
 {
-  char *gcov_intermediate_filename;
+  string gcov_intermediate_filename;
 
   for (vector<function_info *>::iterator it = functions.begin ();
        it != functions.end (); it++)
@@ -1410,17 +1505,13 @@ generate_results (const char *file_name)
     }
 
   name_map needle;
-
-  if (file_name)
-    {
-      needle.name = file_name;
-      vector<name_map>::iterator it = std::find (names.begin (), names.end (),
-						 needle);
-      if (it != names.end ())
-	file_name = sources[it->src].coverage.name;
-      else
-	file_name = canonicalize_name (file_name);
-    }
+  needle.name = file_name;
+  vector<name_map>::iterator it
+    = std::find (names.begin (), names.end (), needle);
+  if (it != names.end ())
+    file_name = sources[it->src].coverage.name;
+  else
+    file_name = canonicalize_name (file_name);
 
   gcov_intermediate_filename = get_gcov_intermediate_filename (file_name);
 
@@ -1454,6 +1545,8 @@ generate_results (const char *file_name)
 	}
 
       accumulate_line_counts (src);
+      if (flag_debug)
+	src->debug ();
 
       if (!flag_use_stdout)
 	file_summary (&src->coverage);
@@ -1462,7 +1555,11 @@ generate_results (const char *file_name)
       if (flag_gcov_file)
 	{
 	  if (flag_json_format)
-	    output_json_intermediate_file (json_files, src);
+	    {
+	      output_json_intermediate_file (json_files, src);
+	      if (!flag_use_stdout)
+		fnotice (stdout, "\n");
+	    }
 	  else
 	    {
 	      if (flag_use_stdout)
@@ -1492,11 +1589,13 @@ generate_results (const char *file_name)
 	  root->print (&pp);
 	  pp_formatted_text (&pp);
 
-	  gzFile output = gzopen (gcov_intermediate_filename, "w");
+	  fnotice (stdout, "Creating '%s'\n",
+		   gcov_intermediate_filename.c_str ());
+	  gzFile output = gzopen (gcov_intermediate_filename.c_str (), "w");
 	  if (output == NULL)
 	    {
 	      fnotice (stderr, "Cannot open JSON output file %s\n",
-		       gcov_intermediate_filename);
+		       gcov_intermediate_filename.c_str ());
 	      return;
 	    }
 
@@ -1504,14 +1603,11 @@ generate_results (const char *file_name)
 	      || gzclose (output))
 	    {
 	      fnotice (stderr, "Error writing JSON output file %s\n",
-		       gcov_intermediate_filename);
+		       gcov_intermediate_filename.c_str ());
 	      return;
 	    }
 	}
     }
-
-  if (!file_name)
-    executed_summary (total_lines, total_executed);
 }
 
 /* Release all memory used.  */
@@ -1791,6 +1887,8 @@ read_graph_file (void)
 	      arc = XCNEW (arc_info);
 
 	      arc->dst = &fn->blocks[dest];
+	      /* Set id in order to find EXIT_BLOCK.  */
+	      arc->dst->id = dest;
 	      arc->src = src_blk;
 
 	      arc->count = 0;
@@ -1936,6 +2034,7 @@ read_count_file (void)
   while ((tag = gcov_read_unsigned ()))
     {
       unsigned length = gcov_read_unsigned ();
+      int read_length = (int)length;
       unsigned long base = gcov_position ();
 
       if (tag == GCOV_TAG_OBJECT_SUMMARY)
@@ -1968,13 +2067,17 @@ read_count_file (void)
 	}
       else if (tag == GCOV_TAG_FOR_COUNTER (GCOV_COUNTER_ARCS) && fn)
 	{
+	  length = abs (read_length);
 	  if (length != GCOV_TAG_COUNTER_LENGTH (fn->counts.size ()))
 	    goto mismatch;
 
-	  for (ix = 0; ix != fn->counts.size (); ix++)
-	    fn->counts[ix] += gcov_read_counter ();
+	  if (read_length > 0)
+	    for (ix = 0; ix != fn->counts.size (); ix++)
+	      fn->counts[ix] += gcov_read_counter ();
 	}
-      gcov_sync (base, length);
+      if (read_length < 0)
+	read_length = 0;
+      gcov_sync (base, read_length);
       if ((error = gcov_is_error ()))
 	{
 	  fnotice (stderr,
@@ -2487,15 +2590,6 @@ canonicalize_name (const char *name)
   return result;
 }
 
-/* Print hex representation of 16 bytes from SUM and write it to BUFFER.  */
-
-static void
-md5sum_to_hex (const char *sum, char *buffer)
-{
-  for (unsigned i = 0; i < 16; i++)
-    sprintf (buffer + (2 * i), "%02x", (unsigned char)sum[i]);
-}
-
 /* Generate an output file name. INPUT_NAME is the canonicalized main
    input file and SRC_NAME is the canonicalized file name.
    LONG_OUTPUT_NAMES and PRESERVE_PATHS affect name generation.  With
@@ -2508,77 +2602,42 @@ md5sum_to_hex (const char *sum, char *buffer)
    component.  (Remember, the canonicalized name will already have
    elided '.' components and converted \\ separators.)  */
 
-static char *
+static string
 make_gcov_file_name (const char *input_name, const char *src_name)
 {
-  char *ptr;
-  char *result;
-
-  if (flag_long_names && input_name && strcmp (src_name, input_name))
-    {
-      /* Generate the input filename part.  */
-      result = XNEWVEC (char, strlen (input_name) + strlen (src_name) + 10);
-
-      ptr = result;
-      ptr = mangle_name (input_name, ptr);
-      ptr[0] = ptr[1] = '#';
-      ptr += 2;
-    }
-  else
-    {
-      result = XNEWVEC (char, strlen (src_name) + 10);
-      ptr = result;
-    }
-
-  ptr = mangle_name (src_name, ptr);
-  strcpy (ptr, ".gcov");
+  string str;
 
   /* When hashing filenames, we shorten them by only using the filename
      component and appending a hash of the full (mangled) pathname.  */
   if (flag_hash_filenames)
+    str = (string (mangle_name (src_name)) + "##"
+	   + get_md5sum (src_name) + ".gcov");
+  else
     {
-      md5_ctx ctx;
-      char md5sum[16];
-      char md5sum_hex[33];
+      if (flag_long_names && input_name && strcmp (src_name, input_name) != 0)
+	{
+	  str += mangle_name (input_name);
+	  str += "##";
+	}
 
-      md5_init_ctx (&ctx);
-      md5_process_bytes (src_name, strlen (src_name), &ctx);
-      md5_finish_ctx (&ctx, md5sum);
-      md5sum_to_hex (md5sum, md5sum_hex);
-      free (result);
-
-      result = XNEWVEC (char, strlen (src_name) + 50);
-      ptr = result;
-      ptr = mangle_name (src_name, ptr);
-      ptr[0] = ptr[1] = '#';
-      ptr += 2;
-      memcpy (ptr, md5sum_hex, 32);
-      ptr += 32;
-      strcpy (ptr, ".gcov");
+      str += mangle_name (src_name);
+      str += ".gcov";
     }
 
-  return result;
+  return str;
 }
 
 /* Mangle BASE name, copy it at the beginning of PTR buffer and
    return address of the \0 character of the buffer.  */
 
 static char *
-mangle_name (char const *base, char *ptr)
+mangle_name (char const *base)
 {
-  size_t len;
-
   /* Generate the source filename part.  */
   if (!flag_preserve_paths)
-    base = lbasename (base);
+    return xstrdup (lbasename (base));
   else
-    base = mangle_path (base);
-
-  len = strlen (base);
-  memcpy (ptr, base, len);
-  ptr += len;
-
-  return ptr;
+    return mangle_path (base);
 }
 
 /* Scan through the bb_data for each line in the block, increment

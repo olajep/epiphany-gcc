@@ -1,5 +1,5 @@
 /* Loop unroll-and-jam.
-   Copyright (C) 2017-2020 Free Software Foundation, Inc.
+   Copyright (C) 2017-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -403,10 +403,10 @@ adjust_unroll_factor (class loop *inner, struct data_dependence_relation *ddr,
 	     a >= N, or b > 0, or b is zero and a > 0.  Otherwise the unroll
 	     factor needs to be limited so that the first condition holds.
 	     That may limit the factor down to zero in the worst case.  */
-	  int dist = dist_v[0];
+	  lambda_int dist = dist_v[0];
 	  if (dist < 0)
 	    gcc_unreachable ();
-	  else if ((unsigned)dist >= *unroll)
+	  else if (dist >= (lambda_int)*unroll)
 	    ;
 	  else if (lambda_vector_zerop (dist_v + 1, DDR_NB_LOOPS (ddr) - 1))
 	    {
@@ -505,15 +505,13 @@ tree_loop_unroll_and_jam (void)
       if (!unroll_jam_possible_p (outer, loop))
 	continue;
 
-      vec<data_reference_p> datarefs;
-      vec<ddr_p> dependences;
+      vec<data_reference_p> datarefs = vNULL;
+      vec<ddr_p> dependences = vNULL;
       unsigned unroll_factor, profit_unroll, removed;
       class tree_niter_desc desc;
       bool unroll = false;
 
       auto_vec<loop_p, 3> loop_nest;
-      dependences.create (10);
-      datarefs.create (10);
       if (!compute_data_dependences_for_loop (outer, true, &loop_nest,
 					      &datarefs, &dependences))
 	{

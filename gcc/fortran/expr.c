@@ -1,5 +1,5 @@
 /* Routines for manipulation of expression nodes.
-   Copyright (C) 2000-2020 Free Software Foundation, Inc.
+   Copyright (C) 2000-2021 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -990,6 +990,34 @@ done:
 }
 
 
+/* Standard intrinsics listed under F2018:10.1.12 (6), which are excluded in
+   constant expressions, except TRANSFER (c.f. item (8)), which would need
+   separate treatment.  */
+
+static bool
+is_non_constant_intrinsic (gfc_expr *e)
+{
+  if (e->expr_type == EXPR_FUNCTION
+      && e->value.function.isym)
+    {
+      switch (e->value.function.isym->id)
+	{
+	  case GFC_ISYM_COMMAND_ARGUMENT_COUNT:
+	  case GFC_ISYM_GET_TEAM:
+	  case GFC_ISYM_NULL:
+	  case GFC_ISYM_NUM_IMAGES:
+	  case GFC_ISYM_TEAM_NUMBER:
+	  case GFC_ISYM_THIS_IMAGE:
+	    return true;
+
+	default:
+	  return false;
+	}
+    }
+  return false;
+}
+
+
 /* Determine if an expression is constant in the sense of F08:7.1.12.
  * This function expects that the expression has already been simplified.  */
 
@@ -1022,6 +1050,10 @@ gfc_is_constant_expr (gfc_expr *e)
     case EXPR_COMPCALL:
       gcc_assert (e->symtree || e->value.function.esym
 		  || e->value.function.isym);
+
+      /* Check for intrinsics excluded in constant expressions.  */
+      if (e->value.function.isym && is_non_constant_intrinsic (e))
+	return false;
 
       /* Call to intrinsic with at least one argument.  */
       if (e->value.function.isym && e->value.function.actual)
@@ -1337,7 +1369,9 @@ find_array_element (gfc_constructor_base base, gfc_array_ref *ar,
   for (i = 0; i < ar->dimen; i++)
     {
       if (!gfc_reduce_init_expr (ar->as->lower[i])
-	  || !gfc_reduce_init_expr (ar->as->upper[i]))
+	  || !gfc_reduce_init_expr (ar->as->upper[i])
+	  || ar->as->upper[i]->expr_type != EXPR_CONSTANT
+	  || ar->as->lower[i]->expr_type != EXPR_CONSTANT)
 	{
 	  t = false;
 	  cons = NULL;
@@ -1350,9 +1384,6 @@ find_array_element (gfc_constructor_base base, gfc_array_ref *ar,
 	  cons = NULL;
 	  goto depart;
 	}
-
-      gcc_assert (ar->as->upper[i]->expr_type == EXPR_CONSTANT
-		  && ar->as->lower[i]->expr_type == EXPR_CONSTANT);
 
       /* Check the bounds.  */
       if ((ar->as->upper[i]
@@ -1684,7 +1715,13 @@ find_array_section (gfc_expr *expr, gfc_ref *ref)
 	}
 
       cons = gfc_constructor_lookup (base, limit);
-      gcc_assert (cons);
+      if (cons == NULL)
+	{
+	  gfc_error ("Error in array constructor referenced at %L",
+		     &ref->u.ar.where);
+	  t = false;
+	  goto cleanup;
+	}
       gfc_constructor_append_expr (&expr->value.constructor,
 				   gfc_copy_expr (cons->expr), NULL);
     }
@@ -1725,8 +1762,8 @@ find_substring_ref (gfc_expr *p, gfc_expr **newp)
   *newp = gfc_copy_expr (p);
   free ((*newp)->value.character.string);
 
-  end = (gfc_charlen_t) mpz_get_ui (p->ref->u.ss.end->value.integer);
-  start = (gfc_charlen_t) mpz_get_ui (p->ref->u.ss.start->value.integer);
+  end = (gfc_charlen_t) mpz_get_si (p->ref->u.ss.end->value.integer);
+  start = (gfc_charlen_t) mpz_get_si (p->ref->u.ss.start->value.integer);
   if (end >= start)
     length = end - start + 1;
   else
@@ -2095,7 +2132,12 @@ simplify_parameter_variable (gfc_expr *p, int type)
       if (e == NULL)
 	return false;
 
+      gfc_free_shape (&e->shape, e->rank);
+      e->shape = gfc_copy_shape (p->shape, p->rank);
       e->rank = p->rank;
+
+      if (e->ts.type == BT_CHARACTER && p->ts.u.cl)
+	e->ts = p->ts;
     }
 
   if (e->ts.type == BT_CHARACTER && e->ts.u.cl == NULL)
@@ -2180,10 +2222,9 @@ gfc_simplify_expr (gfc_expr *p, int type)
 	  && gfc_intrinsic_func_interface (p, 1) == MATCH_ERROR)
 	return false;
 
-      if (p->expr_type == EXPR_FUNCTION)
+      if (p->symtree && (p->value.function.isym || p->ts.type == BT_UNKNOWN))
 	{
-	  if (p->symtree)
-	    isym = gfc_find_function (p->symtree->n.sym->name);
+	  isym = gfc_find_function (p->symtree->n.sym->name);
 	  if (isym && isym->elemental)
 	    scalarize_intrinsic_call (p, false);
 	}
@@ -2289,6 +2330,31 @@ gfc_simplify_expr (gfc_expr *p, int type)
     }
 
   return true;
+}
+
+
+/* Try simplification of an expression via gfc_simplify_expr.
+   When an error occurs (arithmetic or otherwise), roll back.  */
+
+bool
+gfc_try_simplify_expr (gfc_expr *e, int type)
+{
+  gfc_expr *n;
+  bool t, saved_div0;
+
+  if (e == NULL || e->expr_type == EXPR_CONSTANT)
+    return true;
+
+  saved_div0 = gfc_seen_div0;
+  gfc_seen_div0 = false;
+  n = gfc_copy_expr (e);
+  t = gfc_simplify_expr (n, type) && !gfc_seen_div0;
+  if (t)
+    gfc_replace_expr (e, n);
+  else
+    gfc_free_expr (n);
+  gfc_seen_div0 = saved_div0;
+  return t;
 }
 
 
@@ -2904,7 +2970,7 @@ gfc_check_init_expr (gfc_expr *e)
 		   && (e->value.function.isym->conversion == 1);
 
 	if (!conversion && (!gfc_is_intrinsic (sym, 0, e->where)
-	    || (m = gfc_intrinsic_func_interface (e, 0)) != MATCH_YES))
+	    || (m = gfc_intrinsic_func_interface (e, 0)) == MATCH_NO))
 	  {
 	    gfc_error ("Function %qs in initialization expression at %L "
 		       "must be an intrinsic function",
@@ -3004,6 +3070,12 @@ gfc_check_init_expr (gfc_expr *e)
 	      case AS_EXPLICIT:
 		gfc_error ("Array %qs at %L is a variable, which does "
 			   "not reduce to a constant expression",
+			   e->symtree->n.sym->name, &e->where);
+		break;
+
+	      case AS_ASSUMED_RANK:
+		gfc_error ("Assumed-rank array %qs at %L is not permitted "
+			   "in an initialization expression",
 			   e->symtree->n.sym->name, &e->where);
 		break;
 
@@ -3273,7 +3345,7 @@ check_references (gfc_ref* ref, bool (*checker) (gfc_expr*))
   switch (ref->type)
     {
     case REF_ARRAY:
-      for (dim = 0; dim != ref->u.ar.dimen; ++dim)
+      for (dim = 0; dim < ref->u.ar.dimen; ++dim)
 	{
 	  if (!checker (ref->u.ar.start[dim]))
 	    return false;
@@ -3693,7 +3765,7 @@ gfc_check_assign (gfc_expr *lvalue, gfc_expr *rvalue, int conform,
 
   /* Check size of array assignments.  */
   if (lvalue->rank != 0 && rvalue->rank != 0
-      && !gfc_check_conformance (lvalue, rvalue, "array assignment"))
+      && !gfc_check_conformance (lvalue, rvalue, _("array assignment")))
     return false;
 
   /* Handle the case of a BOZ literal on the RHS.  */
@@ -3805,6 +3877,9 @@ gfc_check_pointer_assign (gfc_expr *lvalue, gfc_expr *rvalue,
   bool is_pure, is_implicit_pure, rank_remap;
   int proc_pointer;
   bool same_rank;
+
+  if (!lvalue->symtree)
+    return false;
 
   lhs_attr = gfc_expr_attr (lvalue);
   if (lvalue->ts.type == BT_UNKNOWN && !lhs_attr.proc_pointer)
@@ -4270,8 +4345,22 @@ gfc_check_pointer_assign (gfc_expr *lvalue, gfc_expr *rvalue,
     {
       gfc_symbol *sym;
       bool target;
+      gfc_ref *ref;
 
-      gcc_assert (rvalue->symtree);
+      if (gfc_is_size_zero_array (rvalue))
+	{
+	  gfc_error ("Zero-sized array detected at %L where an entity with "
+		     "the TARGET attribute is expected", &rvalue->where);
+	  return false;
+	}
+      else if (!rvalue->symtree)
+	{
+	  gfc_error ("Pointer assignment target in initialization expression "
+		     "does not have the TARGET attribute at %L",
+		     &rvalue->where);
+	  return false;
+	}
+
       sym = rvalue->symtree->n.sym;
 
       if (sym->ts.type == BT_CLASS && sym->attr.class_ok)
@@ -4285,6 +4374,39 @@ gfc_check_pointer_assign (gfc_expr *lvalue, gfc_expr *rvalue,
 		     "does not have the TARGET attribute at %L",
 		     &rvalue->where);
 	  return false;
+	}
+
+      for (ref = rvalue->ref; ref; ref = ref->next)
+	{
+	  switch (ref->type)
+	    {
+	    case REF_ARRAY:
+	      for (int n = 0; n < ref->u.ar.dimen; n++)
+		if (!gfc_is_constant_expr (ref->u.ar.start[n])
+		    || !gfc_is_constant_expr (ref->u.ar.end[n])
+		    || !gfc_is_constant_expr (ref->u.ar.stride[n]))
+		  {
+		    gfc_error ("Every subscript of target specification "
+			       "at %L must be a constant expression",
+			       &ref->u.ar.where);
+		    return false;
+		  }
+	      break;
+
+	    case REF_SUBSTRING:
+	      if (!gfc_is_constant_expr (ref->u.ss.start)
+		  || !gfc_is_constant_expr (ref->u.ss.end))
+		{
+		  gfc_error ("Substring starting and ending points of target "
+			     "specification at %L must be constant expressions",
+			     &ref->u.ss.start->where);
+		  return false;
+		}
+	      break;
+
+	    default:
+	      break;
+	    }
 	}
     }
   else
@@ -4347,10 +4469,18 @@ gfc_check_pointer_assign (gfc_expr *lvalue, gfc_expr *rvalue,
      contiguous.  */
 
   if (lhs_attr.contiguous
-      && lhs_attr.dimension > 0
-      && !gfc_is_simply_contiguous (rvalue, false, true))
-    gfc_warning (OPT_Wextra, "Assignment to contiguous pointer from "
-		 "non-contiguous target at %L", &rvalue->where);
+      && lhs_attr.dimension > 0)
+    {
+      if (gfc_is_not_contiguous (rvalue))
+	{
+	  gfc_error ("Assignment to contiguous pointer from "
+		     "non-contiguous target at %L", &rvalue->where);
+	  return false;
+	}
+      if (!gfc_is_simply_contiguous (rvalue, false, true))
+	gfc_warning (OPT_Wextra, "Assignment to contiguous pointer from "
+				 "non-contiguous target at %L", &rvalue->where);
+    }
 
   /* Warn if it is the LHS pointer may lives longer than the RHS target.  */
   if (warn_target_lifetime
@@ -5072,7 +5202,8 @@ gfc_get_variable_expr (gfc_symtree *var)
 
   if (var->n.sym->attr.flavor != FL_PROCEDURE
       && ((var->n.sym->as != NULL && var->n.sym->ts.type != BT_CLASS)
-	   || (var->n.sym->ts.type == BT_CLASS && CLASS_DATA (var->n.sym)
+	   || (var->n.sym->ts.type == BT_CLASS && var->n.sym->ts.u.derived
+	       && CLASS_DATA (var->n.sym)
 	       && CLASS_DATA (var->n.sym)->as)))
     {
       e->rank = var->n.sym->ts.type == BT_CLASS
@@ -5824,6 +5955,8 @@ gfc_is_simply_contiguous (gfc_expr *expr, bool strict, bool permit_element)
 	part_ref  = ref;
       else if (ref->type == REF_SUBSTRING)
 	return false;
+      else if (ref->type == REF_INQUIRY)
+	return false;
       else if (ref->u.ar.type != AR_ELEMENT)
 	ar = &ref->u.ar;
     }
@@ -5916,7 +6049,7 @@ gfc_is_not_contiguous (gfc_expr *array)
     {
       /* Array-ref shall be last ref.  */
 
-      if (ar)
+      if (ar && ar->type != AR_ELEMENT)
 	return true;
 
       if (ref->type == REF_ARRAY)
@@ -5936,10 +6069,11 @@ gfc_is_not_contiguous (gfc_expr *array)
 
       if (gfc_ref_dimen_size (ar, i, &ref_size, NULL))
 	{
-	  if (gfc_dep_difference (ar->as->lower[i], ar->as->upper[i], &arr_size))
+	  if (gfc_dep_difference (ar->as->upper[i], ar->as->lower[i], &arr_size))
 	    {
 	      /* a(2:4,2:) is known to be non-contiguous, but
 		 a(2:4,i:i) can be contiguous.  */
+	      mpz_add_ui (arr_size, arr_size, 1L);
 	      if (previous_incomplete && mpz_cmp_si (ref_size, 1) != 0)
 		{
 		  mpz_clear (arr_size);
@@ -5960,7 +6094,10 @@ gfc_is_not_contiguous (gfc_expr *array)
 	      && ar->dimen_type[i] == DIMEN_RANGE
 	      && ar->stride[i] && ar->stride[i]->expr_type == EXPR_CONSTANT
 	      && mpz_cmp_si (ar->stride[i]->value.integer, 1) != 0)
-	    return true;
+	    {
+	      mpz_clear (ref_size);
+	      return true;
+	    }
 
 	  mpz_clear (ref_size);
 	}
@@ -6085,7 +6222,9 @@ gfc_check_vardef_context (gfc_expr* e, bool pointer, bool alloc_obj,
     }
   if (!pointer && sym->attr.flavor != FL_VARIABLE
       && !(sym->attr.flavor == FL_PROCEDURE && sym == sym->result)
-      && !(sym->attr.flavor == FL_PROCEDURE && sym->attr.proc_pointer))
+      && !(sym->attr.flavor == FL_PROCEDURE && sym->attr.proc_pointer)
+      && !(sym->attr.flavor == FL_PROCEDURE
+	   && sym->attr.function && sym->attr.pointer))
     {
       if (context)
 	gfc_error ("%qs in variable definition context (%s) at %L is not"
@@ -6152,11 +6291,24 @@ gfc_check_vardef_context (gfc_expr* e, bool pointer, bool alloc_obj,
     {
       if (ptr_component && ref->type == REF_COMPONENT)
 	check_intentin = false;
-      if (ref->type == REF_COMPONENT && ref->u.c.component->attr.pointer)
+      if (ref->type == REF_COMPONENT)
 	{
-	  ptr_component = true;
-	  if (!pointer)
+	  gfc_component *comp = ref->u.c.component;
+	  ptr_component = (comp->ts.type == BT_CLASS && comp->attr.class_ok)
+			? CLASS_DATA (comp)->attr.class_pointer
+			: comp->attr.pointer;
+	  if (ptr_component && !pointer)
 	    check_intentin = false;
+	}
+      if (ref->type == REF_INQUIRY
+	  && (ref->u.i == INQUIRY_KIND || ref->u.i == INQUIRY_LEN))
+	{
+	  if (context)
+	    gfc_error ("%qs parameter inquiry for %qs in "
+		       "variable definition context (%s) at %L",
+		       ref->u.i == INQUIRY_KIND ? "KIND" : "LEN",
+		       sym->name, context, &e->where);
+	  return false;
 	}
     }
 
@@ -6209,6 +6361,9 @@ gfc_check_vardef_context (gfc_expr* e, bool pointer, bool alloc_obj,
 
   /* Variable not assignable from a PURE procedure but appears in
      variable definition context.  */
+  own_scope = own_scope
+	      || (sym->attr.result && sym->ns->proc_name
+		  && sym == sym->ns->proc_name->result);
   if (!pointer && !own_scope && gfc_pure (NULL) && gfc_impure_variable (sym))
     {
       if (context)
