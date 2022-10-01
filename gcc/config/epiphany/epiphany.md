@@ -2795,15 +2795,13 @@
   else
     {
       int o, i;
-      rtx xop[2], last_out = pc_rtx;
+      rtx xop[3], last_out = pc_rtx;
 
       for (o = 0; o <= UNITS_PER_WORD; o += UNITS_PER_WORD)
 	{
 	  for (i = 0; i < 2; i++)
 	    {
-	      xop[i]
-		= (i == 2 ? operands[2]
-		   : simplify_gen_subreg (SImode, operands[i], V2SImode, o));
+	      xop[i] = simplify_gen_subreg (SImode, operands[i], V2SImode, o);
 	      gcc_assert (!reg_overlap_mentioned_p (last_out, xop[i])
 			  /* ??? reg_overlap_mentioned_p doesn't understand
 			     about multi-word SUBREGs.  */
@@ -2813,7 +2811,14 @@
 			      && ((SUBREG_BYTE (last_out) & -UNITS_PER_WORD)
 				  != (SUBREG_BYTE (xop[i]) & -UNITS_PER_WORD))));
 	    }
-	  emit_insn (gen_ashlsi3 (xop[0], xop[1], operands[2]));
+	  xop[2] = operands[2];
+	  if (MEM_P (xop[2]))
+	    {
+	      rtx reg = gen_reg_rtx (SImode);
+	      emit_move_insn (reg, xop[2]);
+	      xop[2] = reg;
+	    }
+	  emit_insn (gen_ashlsi3 (xop[0], xop[1], xop[2]));
 	  last_out = xop[0];
 	}
       DONE;
