@@ -171,6 +171,11 @@ along with GCC; see the file COPYING3.  If not see
    to produce the correct result.  */
 #define STRICT_ALIGNMENT 1
 
+/* @@@ A hack, needed because libobjc wants to use ADJUST_FIELD_ALIGN /
+   ROUND_TYPE_ALIGN for some reason.  */
+#ifdef IN_TARGET_LIBS
+#define BIGGEST_FIELD_ALIGNMENT BIGGEST_ALIGNMENT
+#else
 /* layout_type overrides our ADJUST_ALIGNMENT settings from epiphany-modes.def
    for vector modes, so we have to override it back.  */
 #define ROUND_TYPE_ALIGN(TYPE, MANGLED_ALIGN, SPECIFIED_ALIGN) \
@@ -187,6 +192,8 @@ along with GCC; see the file COPYING3.  If not see
 
 #define ADJUST_FIELD_ALIGN(FIELD, TYPE, COMPUTED) \
   epiphany_adjust_field_align((TYPE), (COMPUTED))
+#endif
+
 
 /* Layout of source language data types.  */
 

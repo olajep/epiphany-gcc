@@ -1,3 +1,11 @@
+2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
+
+	* config/epiphany/epiphany.h [IN_TARGET_LIBS]
+	(BIGGEST_FIELD_ALIGNMENT): Add definition. Hack for libobjc.
+	[!IN_TARGET_LIBS] (ROUND_TYPE_ALIGN, ADJUST_FIELD_ALIGN):
+	Guard macros so they are not defined when included from target
+	libs.
+
 2022-08-25  Ola Jeppsson  <ola.jeppsson@gmail.com>
 
 	* config/epiphany/epiphany.h (READONLY_DATA_SECTION_ASM_OP):
