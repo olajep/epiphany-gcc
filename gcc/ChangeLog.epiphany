@@ -1,3 +1,10 @@
+2022-10-16  Ola Jeppsson  <ola.jeppsson@gmail.com>
+
+	* config/epiphany/epiphany.md (movcc): Convert non-CC_REGNUM
+	register-register moves to SI to break lra loop.
+	(movcc_i): Fix length attribute.
+	(movcc_i2): New pattern. Recognize memory-register CCmode moves.
+
 2022-10-01  Ola Jeppsson  <ola.jeppsson@gmail.com>
 
 	* config/epiphany/epiphany.c (epiphany_function_arg_boundary):

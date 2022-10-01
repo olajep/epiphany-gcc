@@ -1544,19 +1544,45 @@
 	      (use (match_dup 2))
 	      (clobber (match_scratch:SI 3                 "=X, &r"))])]
   ""
-  "operands[2] = gen_int_mode (~0x10f0, SImode);")
+{
+  operands[2] = gen_int_mode (~0x10f0, SImode);
+
+  if (TARGET_LRA &&
+      GET_MODE (operands[0]) == CCmode && GET_MODE (operands[1]) == CCmode &&
+      REG_P (operands[0]) && REG_P (operands[1]) &&
+      REGNO (operands[0]) != CC_REGNUM && REGNO (operands[1]) != CC_REGNUM)
+    {
+      rtx op0 = simplify_gen_subreg (SImode, operands[0], CCmode, 0);
+      rtx op1 = simplify_gen_subreg (SImode, operands[1], CCmode, 0);
+      emit_move_insn (op0, op1);
+      DONE;
+    }
+})
 
 (define_insn "*movcc_i"
-  [(set (match_operand:CC 0 "cc_move_operand"  "=r,Rcc")
-	(match_operand:CC 1 "cc_move_operand" "Rcc,  r"))
-   (use (match_operand:SI 2 "nonmemory_operand"  "X,  r"))
+  [(set (match_operand:CC 0 "cc_move_operand"   "=r, Rcc")
+	(match_operand:CC 1 "cc_move_operand"   "Rcc,r"))
+   (use (match_operand:SI 2 "nonmemory_operand" "X,  r"))
    (clobber (match_scratch:SI 3                 "=X, &r"))]
   ""
   "@
    movfs %0,status
    movfs %3,status\;eor %3,%3,%1\;and %3,%3,%2\;eor %3,%3,%1\;movts status,%3"
   [(set_attr "type" "flow")
-   (set_attr "length" "20,4")])
+   (set_attr "length" "4,20")])
+
+;; reload can transform movcc insns to this type
+(define_insn "*movcc_i2"
+  [(set (match_operand:CC 0 "nonimmediate_operand" "=r,m")
+	(match_operand:CC 1 "nonimmediate_operand" "m, r"))
+   (use (match_operand:SI 2 "nonmemory_operand"    "X, X"))
+   (clobber (match_scratch:SI 3                    "=X,X"))]
+  ""
+  "@
+  ldr %0, %C1; movcc_i2
+  str %1, %C0; movcc_i2"
+  [(set_attr "type" "flow")
+   (set_attr "length" "4,4")])
 
 (define_insn_and_split "save_config"
   [(set (match_operand:SI 0 "gpr_operand" "=r") (reg:SI CONFIG_REGNUM))
